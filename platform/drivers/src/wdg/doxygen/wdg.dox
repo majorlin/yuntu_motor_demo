@@ -1,0 +1,88 @@
+/*!
+@defgroup wdg Watchdog timer (WDG)
+@brief The YTMicro SDK provides Peripheral Driver for the Watchdog timer (WDG) module of YTMicro SDK devices.
+
+## The WDG supports features:
+- Support 32-bit countdown timer
+- Support regular or window servicing mode
+- Support reset request or interrupt for the first timeout
+- Support hard and soft configuration lock bits
+- Support fixed key for dog feeding
+
+## Integration guideline
+
+The following files need to be compiled in the project:
+```sh
+${SDK_PATH}\platform\drivers\src\wdg\wdg_driver.c
+${SDK_PATH}\platform\drivers\src\wdg\wdg_hw_driver.c
+```
+
+## Include path
+
+The following paths need to be added to the include path of the toolchain:
+```sh
+${SDK_PATH}\platform\drivers\inc\
+```
+
+## Preprocessor symbols
+
+No special symbols are required for this component
+
+## Dependencies
+
+- \ref clock_manager
+- \ref interrupt_manager
+
+@defgroup wdg_driver WDG Driver
+@ingroup wdg
+
+## WDG Driver Guide
+
+If the macro WDG_CR_CLKSRC_MASK MASK is defined,The WDG clock source has two options: SIRC and SXOSC, It is selected from the clockSource member variable of the wdg_user_CONFIG_t structure.
+
+The macro WDG_CR_CLKSRC_MASK is automatically defined, depending on the chip model.
+
+## WDG Driver Operation
+
+This is example code to configure the WDG driver:
+```c
+#define INST_WDG1 (0U)
+
+const wdg_user_config_t WDG_Cfg_Default = {
+    .opMode = {               /* WDG not functional in Wait/Debug/Stop mode */
+        .deepsleep = true,
+        .debug = false,
+    },
+    .updateEnable = true,     /* Enable further updates of the WDG configuration */
+    .intEnable = false,       /* Timeout interrupt disabled */
+    .winEnable = false,       /* Window mode disabled */
+    .windowValue = 0U,        /* Window value */
+    .timeoutValue = 0x400,   /* Timeout value */
+    #if (defined(WDG_CR_CLKSRC_MASK))
+    .clockSource = WDG_SXOSC_CLOCK,    /*Clock source*/
+    #endif
+};
+
+/* Main*/
+void main(void)
+{
+   ... 
+
+   /* Initialize WDG module */
+   WDG_DRV_Init(INST_WDG1, &userConfigPtr);
+
+   /* Enable the timeout interrupt and set the ISR */
+   WDG_DRV_SetInt(INST_WDG1, true);
+
+   while (1) {
+
+       /* Do something that takes in 0x400 clock cycles */
+
+       /* Refresh the counter */
+       WDG_DRV_Trigger(INST_WDG1);
+   }
+
+   return 0;
+}
+```
+*/

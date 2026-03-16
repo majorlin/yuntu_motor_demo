@@ -1,0 +1,58 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "cortex-debug",
+            "request": "launch",
+            "name": "Debug jlink",
+            "cwd": "${workspaceRoot}",
+            "preLaunchTask": "CMake: build",
+            "executable": "${workspaceRoot}/build/yuntu_motor_demo.elf",
+            "serverpath": "C:\\Program Files (x86)\\SEGGER\\JLink\\JLinkGDBServerCL.exe",
+            "servertype": "jlink",
+            "device": "YTM32B1ME05",
+            "interface": "swd",
+            "runToEntryPoint": "main",
+            "svdFile": "${workspaceFolder}/.vscode/chip.svd",
+            "rttConfig": {
+                "enabled": false,
+                "decoders": [
+                    {
+                        "port": 0,
+                        "type": "console"
+                    }
+                ]
+            },
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 4
+            }
+        },
+        {
+            "type": "cortex-debug",
+            "request": "attach",
+            "name": "Attach jlink",
+            "cwd": "${workspaceRoot}",
+            "executable": "${workspaceRoot}/build/yuntu_motor_demo.elf",
+            "serverpath": "C:\\Program Files (x86)\\SEGGER\\JLink\\JLinkGDBServerCL.exe",
+            "servertype": "jlink",
+            "device": "YTM32B1ME05",
+            "interface": "swd",
+            "runToEntryPoint": "main",
+            "svdFile": "${workspaceFolder}/.vscode/chip.svd",
+            "rttConfig": {
+                "enabled": false,
+                "decoders": [
+                    {
+                        "port": 0,
+                        "type": "console"
+                    }
+                ]
+            },
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 4
+            }
+        }
+    ]
+}

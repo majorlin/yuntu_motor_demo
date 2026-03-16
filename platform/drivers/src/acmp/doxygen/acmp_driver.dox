@@ -1,0 +1,273 @@
+/*!
+  
+   @defgroup acmp Comparator (ACMP) 
+   ## Hardware background ##
+   The comparator (ACMP) module is an analog comparator integrated in MCU.
+   
+   Features of the ACMP module include:   
+   - 8 bit DAC with 2 voltage reference source
+   - 8 analog inputs from external pins
+   - Round robin check. In summary, this allow the ACMP to operate independently 
+   in STOP and VLPS mode, whilst being triggered periodically to sample up to 8
+   inputs. Only if an input changes state is a full wakeup generated.
+   - Operational over the entire supply range
+   - Inputs may range from rail to rail
+   - Programmable hysteresis control
+   - Selectable interrupt on rising-edge, falling-edge, or both rising or falling edges of the
+comparator output
+   - Selectable inversion on comparator output
+   - Capability to produce a wide range of outputs such as: sampled, windowed, which is ideal for certain PWM zero-crossing-detection applications and digitally filtered
+   - A comparison event can be selected to trigger a DMA transfer
+   - The window and filter functions are not available in STOP modes.	
+
+
+   ## How to use the ACMP driver in your application ##
+   
+   The user can configure the ACMP in many ways: 
+		-ACMP_DRV_Init - configures all ACMP features
+		-ACMP_DRV_ConfigDac - configures only DAC features
+		-ACMP_DRV_ConfigContinuous - configures only trigger mode features
+		-ACMP_DRV_ConfigComparator - configures only analog comparator features
+		-ACMP_DRV_ConfigMux - configures only MUX features
+   
+   Also the current configuration can be read using:
+		-ACMP_DRV_GetConfigAll - gets all ACMP configuration
+		-ACMP_DRV_GetDacConfig - gets only DAC configuration
+		-ACMP_DRV_GetMuxConfig - gets only MUX configuration
+		-ACMP_DRV_GetInitTriggerMode - gets only trigger mode configuration
+		-ACMP_DRV_GetComparatorConfig - gets only analog comparator features
+	
+	A default configuration can be get using:
+        -ACMP_DRV_GetDefaultConfig - gets a default configuration for the comparator
+	
+   When the MCU exits from STOP mode ACMP_DRV_GetInputFlags can be used to get the channel which triggered the wakeup. Please use this function only in this use case.
+ ACMP_DRV_ClearInputFlags will be used to clear this input change flags.
+
+   ACMP_DRV_GetOutputFlags can be used to get output flag state and ACMP_DRV_ClearOutputFlags to clear them.
+	
+	The main structure used to configure your application is <b>acmp_config_t</b>. This structure includes
+configuration structures for trigger mode, MUX, DAC and comparator: <b>acmp_comparator_config_t</b>, <b>acmp_mux_config_t</b>,
+<b>acmp_dac_config_t</b> and <b>acmp_continuous_config_t</b>	
+
+    If application use ACMP as wakeup source from Standby mode on MPC574x devices is mandatory to enable channel 3 from WKPU.
+
+	## Integration guideline ##
+ 
+### Compilation units ###
+
+The following files need to be compiled in the project:
+\verbatim
+${SDK_PATH}\platform\drivers\src\acmp\acmp_driver.c
+${SDK_PATH}\platform\drivers\src\acmp\acmp_hw_access.c
+\endverbatim
+
+### Include path ###
+
+The following paths need to be added to the include path of the toolchain:
+\verbatim
+${SDK_PATH}\platform\drivers\inc\
+${SDK_PATH}\platform\drivers\src\acmp\
+\endverbatim
+
+### Compile symbols ###
+
+No special symbols are required for this component
+
+### Dependencies ###
+
+\ref clock_manager
+\ref interrupt_manager
+\ref pins
+
+   #### Example for YTM32B1Mx: ####
+   The next example will compare 2 external signals (ACMP input 0 an ACMP input 1). The output can be measured on port E, pin 4.
+@code  
+   const acmp_config_t acmp_general_config =
+    {
+        {
+            .dmaTriggerEnable        = false,
+            .edgeSelection = ACMP_NO_EVENT,
+            .mode                   = ACMP_CONTINUOUS,
+            .filterSamplePeriod     = 0,
+            .filterSampleCount      = 0,
+            .powerMode              = ACMP_LOW_SPEED,
+            .inverterState          = ACMP_OUT_POL_NOT_INVERT,
+            .outputSelect           = ACMP_COUT,
+            .pinState               = ACMP_AVAILABLE,
+            .offsetLevel            = ACMP_LEVEL_OFFSET_0,
+            .hysteresisLevel        = ACMP_LEVEL_HYS_0
+        },
+        
+        {
+            .positivePortMux        = ACMP_MUX,
+            .negativePortMux        = ACMP_MUX,
+            .positiveInputMux       = 0,
+            .negativeInputMux       = 1
+        },
+        
+        {
+            .voltageReferenceSource = ACMP_VIN1,
+            .voltage                = 120,
+            .state                  = false
+        },
+        
+        {
+            .continuousModeEnable            = false,
+            .continuousModeInterruptState   = false,
+            .fixedPort                  = ACMP_PLUS_FIXED,
+            .fixedChannel               = 0,
+            .samples                    = 0,
+            .initializationDelay        = 0,
+            /* Channel 0 is enabled for round robin check */
+            /* Channel 1 is enabled for round robin check */
+            /* Channel 2 is enabled for round robin check */
+            /* Channel 3 is enabled for round robin check */
+            /* Channel 4 is enabled for round robin check */
+            /* Channel 5 is enabled for round robin check */
+            /* Channel 6 is enabled for round robin check */
+            /* Channel 7 is enabled for round robin check */
+            .continuousModeChannelsState    = 255, 
+            /* Initial comparison result for channel 0 is 1 */
+            /* Initial comparison result for channel 1 is 1 */
+            /* Initial comparison result for channel 2 is 1 */
+            /* Initial comparison result for channel 3 is 1 */
+            /* Initial comparison result for channel 4 is 1 */
+            /* Initial comparison result for channel 5 is 1 */
+            /* Initial comparison result for channel 6 is 1 */
+            /* Initial comparison result for channel 7 is 1 */
+            .programedState             = 255
+        }       
+    };
+	
+	#define	COMPARATOR_PORT			PORTA
+	#define	COMPARATOR_INPUT1_PIN	0UL
+	#define	COMPARATOR_INPUT2_PIN	1UL
+	#define COMPARATOR_OUTPUT		4UL
+	#define COMPARATOR_INSTANCE		0UL
+     
+    int main(void)
+	{
+		/* Initialize and configure clocks
+         *  -   Setup system clocks
+         *  -   Enable clock feed for Ports and Comparator
+         *  -   See Clock Manager component for more info
+         */
+        CLOCK_SYS_Init(g_clockManConfigsArr, CLOCK_MANAGER_CONFIG_CNT,
+                            g_clockManCallbacksArr, CLOCK_MANAGER_CALLBACK_CNT);
+        CLOCK_SYS_UpdateConfiguration(0U, CLOCK_MANAGER_POLICY_AGREEMENT);
+
+		/* Set pins used by ACMP */
+		/* The negative port is connected to GPIOA0 and positive port is connected to GPIOA1. The
+		 comparator output can be visualized on GPIOA4 */
+		/* Initialize pins
+         *  -   Setup input pins for Comparator
+         *  -   Setup output pins for LEDs
+         *  -   See PinSettings component for more info
+         */
+        PINS_DRV_Init(NUM_OF_CONFIGURED_PINS, g_pin_mux_InitConfigArr);
+		
+		/* Init ACMP module */
+		ACMP_DRV_Init(COMPARATOR_INSTANCE, &acmp_general_config);
+		for (;;)
+			{}
+		return(0);
+	}
+@endcode
+
+
+   #### Example for YTM32B1Mx: ####
+   The next example will compare 2 external signals (ACMP input 0 an ACMP input 1). The output can be measured on port E, pin 4.
+@code  
+   const acmp_config_t acmp_general_config =
+    {
+        {
+            .dmaTriggerEnable        = false,
+            .edgeSelection = ACMP_NO_EVENT,
+            .mode                   = ACMP_CONTINUOUS,
+            .filterSamplePeriod     = 0,
+            .filterSampleCount      = 0,
+            .powerMode              = ACMP_LOW_SPEED,
+            .inverterState          = ACMP_OUT_POL_NOT_INVERT,
+            .outputSelect           = ACMP_COUT,
+            .pinState               = ACMP_AVAILABLE,
+            .hysteresisLevel        = ACMP_LEVEL_HYS_0
+        },
+        
+        {
+            .positivePortMux        = ACMP_MUX,
+            .negativePortMux        = ACMP_MUX,
+            .positiveInputMux       = 0,
+            .negativeInputMux       = 1
+        },
+        
+        {
+            .voltageReferenceSource = ACMP_VIN1,
+            .voltage                = 120,
+            .state                  = false,
+			.fixRefInputMux         = false
+        },
+        
+        {
+            .continuousModeEnable            = false,
+            .continuousModeInterruptState   = false,
+            .fixedPort                  = ACMP_PLUS_FIXED,
+            .fixedChannel               = 0,
+            .samples                    = 0,
+            /* Channel 0 is enabled for round robin check */
+            /* Channel 1 is enabled for round robin check */
+            /* Channel 2 is enabled for round robin check */
+            /* Channel 3 is enabled for round robin check */
+            /* Channel 4 is enabled for round robin check */
+            /* Channel 5 is enabled for round robin check */
+            /* Channel 6 is enabled for round robin check */
+            /* Channel 7 is enabled for round robin check */
+            .continuousModeChannelsState    = 255, 
+            /* Initial comparison result for channel 0 is 1 */
+            /* Initial comparison result for channel 1 is 1 */
+            /* Initial comparison result for channel 2 is 1 */
+            /* Initial comparison result for channel 3 is 1 */
+            /* Initial comparison result for channel 4 is 1 */
+            /* Initial comparison result for channel 5 is 1 */
+            /* Initial comparison result for channel 6 is 1 */
+            /* Initial comparison result for channel 7 is 1 */
+            .programedState             = 255
+        }       
+    };
+	
+	#define	COMPARATOR_PORT			PORTA
+	#define	COMPARATOR_INPUT1_PIN	0UL
+	#define	COMPARATOR_INPUT2_PIN	1UL
+	#define COMPARATOR_OUTPUT		4UL
+	#define COMPARATOR_INSTANCE		0UL
+     
+    int main(void)
+	{
+		/* Write your local variable definition here */
+		/* Initialize and configure clocks
+         *  -   Setup system clocks
+         *  -   Enable clock feed for Ports and Comparator
+         *  -   See Clock Manager component for more info
+         */
+        CLOCK_SYS_Init(g_clockManConfigsArr, CLOCK_MANAGER_CONFIG_CNT,
+                            g_clockManCallbacksArr, CLOCK_MANAGER_CALLBACK_CNT);
+        CLOCK_SYS_UpdateConfiguration(0U, CLOCK_MANAGER_POLICY_AGREEMENT);
+
+		/* Set pins used by ACMP */
+		/* The negative port is connected to GPIOA0 and positive port is connected to GPIOA1. The
+		 comparator output can be visualized on GPIOA4 */
+		/* Initialize pins
+         *  -   Setup input pins for Comparator
+         *  -   Setup output pins for LEDs
+         *  -   See PinSettings component for more info
+         */
+        PINS_DRV_Init(NUM_OF_CONFIGURED_PINS, g_pin_mux_InitConfigArr);
+		
+		/* Init ACMP module */
+		ACMP_DRV_Init(COMPARATOR_INSTANCE, &acmp_general_config);
+		for (;;)
+			{}
+		return(0);
+	}
+@endcode
+
+@}*/

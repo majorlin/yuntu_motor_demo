@@ -1,0 +1,52 @@
+{
+    "env": {
+        "PROJ_DIR": "${workspaceFolder}"
+    },
+    "configurations": [
+        {
+            "name": "YTM32B1ME0",
+            "intelliSenseMode": "gcc-x64",
+            "includePath": [
+                "${PROJ_DIR}/board",
+                "${PROJ_DIR}/platform/drivers/src/clock/YTM32B1Mx",
+                "${PROJ_DIR}/platform/drivers/src/pins",
+                "${PROJ_DIR}/platform/drivers/src/dma",
+                "${PROJ_DIR}/platform/drivers/src/spi",
+                "${PROJ_DIR}/platform/drivers/src/linflexd",
+                "${PROJ_DIR}/platform/drivers/src/flexcan",
+                "${PROJ_DIR}/platform/drivers/src/i2c",
+                "${PROJ_DIR}/platform/drivers/src/tmu",
+                "${PROJ_DIR}/platform/drivers/src/ptmr",
+                "${PROJ_DIR}/platform/drivers/src/lptmr",
+                "${PROJ_DIR}/platform/drivers/src/etmr",
+                "${PROJ_DIR}/platform/drivers/src/adc",
+                "${PROJ_DIR}/platform/drivers/src/acmp",
+                "${PROJ_DIR}/platform/drivers/src/wdg",
+                "${PROJ_DIR}/platform/drivers/src/flash",
+                "${PROJ_DIR}/platform/drivers/inc",
+                "${PROJ_DIR}/platform/drivers/inc/etmr",
+                "${PROJ_DIR}/platform/devices/common",
+                "${PROJ_DIR}/platform/devices",
+                "${PROJ_DIR}/platform/devices/YTM32B1ME0/include",
+                "${PROJ_DIR}/platform/devices/YTM32B1ME0/startup",
+                "${PROJ_DIR}/CMSIS/Core/Include",
+                "${PROJ_DIR}/rtos/osif"
+            ],
+            "defines": [
+                "YTM32B1ME0",
+                "CPU_YTM32B1ME0"
+            ],
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}"
+                ],
+                "limitSymbolsToIncludedHeaders": true,
+                "databaseFilename": ""
+            },
+            "configurationProvider": "ms-vscode.cmake-tools"
+        }
+    ]
+}

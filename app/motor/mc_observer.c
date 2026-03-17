@@ -12,16 +12,16 @@ static float MC_Observer_Sat(float value, float boundary)
 
 void MC_Observer_Init(mc_observer_t *observer, const mc_user_config_t *config)
 {
-    observer->type = config->observer_type;
-    observer->smo.rs_ohm = config->motor.rs_ohm;
-    observer->smo.ls_h = 0.5f * (config->motor.ld_h + config->motor.lq_h);
-    observer->smo.dt_s = 1.0f / config->control.current_loop_hz;
-    observer->smo.slide_gain = config->smo.slide_gain;
-    observer->smo.slide_boundary_a = config->smo.slide_boundary_a;
-    observer->smo.valid_bemf_v = config->smo.valid_bemf_v;
-    MC_LPF_Init(&observer->smo.bemf_alpha_lpf, config->smo.emf_filter_hz, observer->smo.dt_s, 0.0f);
-    MC_LPF_Init(&observer->smo.bemf_beta_lpf, config->smo.emf_filter_hz, observer->smo.dt_s, 0.0f);
-    MC_LPF_Init(&observer->smo.speed_lpf, config->smo.speed_filter_hz, observer->smo.dt_s, 0.0f);
+    observer->type = config->user.observer_type;
+    observer->smo.rs_ohm = config->user.motor.rs_ohm;
+    observer->smo.ls_h = config->derived.ls_avg_h;
+    observer->smo.dt_s = config->derived.current_loop_dt_s;
+    observer->smo.slide_gain = config->user.smo.slide_gain;
+    observer->smo.slide_boundary_a = config->user.smo.slide_boundary_a;
+    observer->smo.valid_bemf_v = config->user.smo.valid_bemf_v;
+    MC_LPF_Init(&observer->smo.bemf_alpha_lpf, config->user.smo.emf_filter_hz, observer->smo.dt_s, 0.0f);
+    MC_LPF_Init(&observer->smo.bemf_beta_lpf, config->user.smo.emf_filter_hz, observer->smo.dt_s, 0.0f);
+    MC_LPF_Init(&observer->smo.speed_lpf, config->user.smo.speed_filter_hz, observer->smo.dt_s, 0.0f);
     MC_Observer_Reset(observer);
 }
 

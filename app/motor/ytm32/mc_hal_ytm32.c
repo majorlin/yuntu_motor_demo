@@ -84,7 +84,7 @@ static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
     uint32_t pwm_clk_hz;
     uint8_t channel;
 
-    s_etmr_instance = config->hardware.etmr_instance;
+    s_etmr_instance = config->user.hardware.etmr_instance;
     s_etmr_base = g_etmrBase[s_etmr_instance];
 
     sync_method.regSyncFreq = 1U;
@@ -121,12 +121,12 @@ static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
     }
 
     pwm_clk_hz = eTMR_DRV_GetFrequency(s_etmr_instance);
-    if ((pwm_clk_hz == 0U) || (config->hardware.pwm_frequency_hz == 0U))
+    if ((pwm_clk_hz == 0U) || (config->user.hardware.pwm_frequency_hz == 0U))
     {
         return STATUS_ERROR;
     }
 
-    s_pwm_period_ticks = pwm_clk_hz / (config->hardware.pwm_frequency_hz * 2U);
+    s_pwm_period_ticks = pwm_clk_hz / (config->user.hardware.pwm_frequency_hz * 2U);
     if (s_pwm_period_ticks == 0U)
     {
         s_pwm_period_ticks = 1U;
@@ -157,9 +157,9 @@ static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
     eTMR_DRV_SetChnCompMode(s_etmr_instance, 2U, PWM_COMPLEMENTARY_MODE);
     eTMR_DRV_SetChnCompMode(s_etmr_instance, 3U, PWM_COMPLEMENTARY_MODE);
 
-    eTMR_SetChnDeadtime(s_etmr_base, MC_HAL_PWM_A_HIGH_CH, config->hardware.deadtime_ticks);
-    eTMR_SetChnDeadtime(s_etmr_base, MC_HAL_PWM_B_HIGH_CH, config->hardware.deadtime_ticks);
-    eTMR_SetChnDeadtime(s_etmr_base, MC_HAL_PWM_C_HIGH_CH, config->hardware.deadtime_ticks);
+    eTMR_SetChnDeadtime(s_etmr_base, MC_HAL_PWM_A_HIGH_CH, config->derived.deadtime_ticks);
+    eTMR_SetChnDeadtime(s_etmr_base, MC_HAL_PWM_B_HIGH_CH, config->derived.deadtime_ticks);
+    eTMR_SetChnDeadtime(s_etmr_base, MC_HAL_PWM_C_HIGH_CH, config->derived.deadtime_ticks);
 
     MC_HAL_YTM32_WritePair(MC_HAL_PWM_A_HIGH_CH, MC_HAL_PWM_A_LOW_CH, 0.5f);
     MC_HAL_YTM32_WritePair(MC_HAL_PWM_B_HIGH_CH, MC_HAL_PWM_B_LOW_CH, 0.5f);
@@ -179,9 +179,9 @@ static status_t MC_HAL_YTM32_InitAdc(const mc_user_config_t *config)
 {
     adc_converter_config_t adc_config;
 
-    s_adc_instance = config->hardware.adc_instance;
+    s_adc_instance = config->user.hardware.adc_instance;
     ADC_DRV_InitConverterStruct(&adc_config);
-    adc_config.triggerSource = config->hardware.adc_trigger_source;
+    adc_config.triggerSource = config->user.hardware.adc_trigger_source;
     adc_config.trigger = ADC_TRIGGER_HARDWARE;
     adc_config.sequenceConfig.channels[0] = MC_HAL_ADC_CH_IA;
     adc_config.sequenceConfig.channels[1] = MC_HAL_ADC_CH_IB;

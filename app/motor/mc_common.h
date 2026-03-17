@@ -110,12 +110,15 @@ typedef struct
 
 typedef struct
 {
-    float current_a_per_count;
-    float vbus_v_per_count;
-    float temp_c_per_count;
-    float temp_c_offset;
+    float adc_reference_voltage_v;
     uint16_t adc_full_scale;
-} mc_adc_scale_t;
+    float current_shunt_resistor_ohm;
+    float current_amplifier_gain;
+    float vbus_divider_upper_resistor_ohm;
+    float vbus_divider_lower_resistor_ohm;
+    float temperature_sensor_voltage_at_25c_v;
+    float temperature_sensor_slope_v_per_c;
+} mc_feedback_hw_params_t;
 
 typedef struct
 {
@@ -178,7 +181,7 @@ typedef struct
     uint32_t adc_instance;
     uint8_t adc_trigger_source;
     uint32_t pwm_frequency_hz;
-    uint16_t deadtime_ticks;
+    float deadtime_ns;
     float min_duty;
     uint16_t calibration_samples;
 } mc_hardware_config_t;
@@ -189,13 +192,33 @@ typedef struct
     mc_observer_type_t observer_type;
     mc_startup_mode_t startup_mode;
     mc_motor_params_t motor;
-    mc_adc_scale_t adc_scale;
+    mc_feedback_hw_params_t feedback;
     mc_control_config_t control;
     mc_smo_config_t smo;
     mc_forced_drag_config_t forced_drag;
     mc_protection_config_t protection;
     mc_command_config_t command;
     mc_hardware_config_t hardware;
+} mc_config_params_t;
+
+typedef struct
+{
+    float adc_lsb_voltage_v;
+    float current_a_per_count;
+    float vbus_v_per_count;
+    float temp_c_per_count;
+    float temp_c_offset;
+    float current_loop_dt_s;
+    float speed_loop_dt_s;
+    float ls_avg_h;
+    uint16_t current_offset_default_raw;
+    uint16_t deadtime_ticks;
+} mc_derived_params_t;
+
+typedef struct
+{
+    mc_config_params_t user;
+    mc_derived_params_t derived;
 } mc_user_config_t;
 
 #endif

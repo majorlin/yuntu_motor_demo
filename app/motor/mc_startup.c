@@ -3,8 +3,8 @@
 
 void MC_Startup_Init(mc_startup_t *startup, const mc_user_config_t *config)
 {
-    startup->type = config->startup_mode;
-    startup->config = config->forced_drag;
+    startup->type = config->user.startup_mode;
+    startup->config = config->user.forced_drag;
     MC_Startup_Reset(startup);
 }
 

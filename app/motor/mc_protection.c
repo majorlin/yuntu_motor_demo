@@ -3,7 +3,7 @@
 
 void MC_Protection_Init(mc_protection_t *protection, const mc_user_config_t *config)
 {
-    protection->config = config->protection;
+    protection->config = config->user.protection;
     MC_Protection_Reset(protection);
 }
 

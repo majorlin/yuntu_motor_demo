@@ -22,15 +22,13 @@ include(${CMAKE_SOURCE_DIR}/cmake/targets/GENERATED_SDK_TARGET.cmake)
 # USER CODE END include
 
 set(project_elf yuntu_motor_demo.elf)
-add_executable(${project_elf} app/main.c)
+add_executable(${project_elf})
 #add app as include path
 target_include_directories(${project_elf} PRIVATE app)
-#add all source files in app folder 
-file(GLOB dir_sources "app/*.c" "app/*.cpp" "app/*.S")
+#add all source files in app folder
+file(GLOB_RECURSE dir_sources CONFIGURE_DEPENDS "app/*.c" "app/*.cpp" "app/*.S")
 if(dir_sources)
-    foreach(src ${dir_sources})
-        target_sources(${project_elf} PRIVATE ${src})
-    endforeach()
+    target_sources(${project_elf} PRIVATE ${dir_sources})
 endif()
 
 # USER CODE BEGIN add_executable

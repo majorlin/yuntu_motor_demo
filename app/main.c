@@ -13,6 +13,7 @@
 
 /* USER CODE END Header */
 #include "sdk_project_config.h"
+#include "motor/motor_app.h"
 /* Includes ------------------------------------------------------------------*/
 
 /* Private includes ----------------------------------------------------------*/
@@ -54,6 +55,7 @@ int main(void)
     /* USER CODE BEGIN 1 */
     /* USER CODE END 1 */ 
     Board_Init();
+    MotorApp_Init();
     /* USER CODE BEGIN 2 */
     /* USER CODE END 2 */
 
@@ -61,6 +63,7 @@ int main(void)
     /* USER CODE BEGIN WHILE */
     while (1)
     {
+        MotorApp_Run();
         /* USER CODE END WHILE */
         /* USER CODE BEGIN 3 */
     }
@@ -76,6 +79,7 @@ static void Board_Init(void)
         /* USER CODE END ERROR_HANDLER 1 */
     }
     PINS_DRV_Init(NUM_OF_CONFIGURED_PINS0,g_pin_mux_InitConfigArr0);
+    INT_SYS_ConfigInit();
 }
 
 /* USER CODE BEGIN 4 */

@@ -168,6 +168,8 @@ typedef struct
     float phase_loss_current_a;
     float phase_loss_speed_rpm;
     float phase_loss_hold_time_s;
+    bool enable_over_temperature;
+    bool enable_phase_loss;
 } mc_protection_config_t;
 
 typedef struct

@@ -152,7 +152,7 @@ static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
         return STATUS_ERROR;
     }
 
-    s_pwm_period_ticks = pwm_clk_hz / (config->user.hardware.pwm_frequency_hz * 2U);
+    s_pwm_period_ticks = pwm_clk_hz / (config->user.hardware.pwm_frequency_hz);
     if (s_pwm_period_ticks == 0U)
     {
         s_pwm_period_ticks = 1U;
@@ -218,11 +218,13 @@ static status_t MC_HAL_YTM32_InitAdc(const mc_user_config_t *config)
     adc_config.sequenceConfig.sequenceIntEnable = true;
     adc_config.sequenceConfig.convIntEnable = false;
     adc_config.sequenceConfig.ovrunIntEnable = true;
+    /* Enable temp sensor */
     ADC_DRV_ConfigConverter(s_adc_instance, &adc_config);
     ADC_DRV_ClearEoseqFlagCmd(s_adc_instance);
     ADC_DRV_ClearOvrFlagCmd(s_adc_instance);
     INT_SYS_SetPriority(ADC_DRV_GetInterruptNumber(s_adc_instance), 1U);
     INT_SYS_EnableIRQ(ADC_DRV_GetInterruptNumber(s_adc_instance));
+    ADC0->CTRL |= ADC_CTRL_TSEN(1);
     ADC_DRV_Start(s_adc_instance);
     return STATUS_SUCCESS;
 }
@@ -273,6 +275,7 @@ static void MC_HAL_YTM32_EnableOutputs(bool enable)
 
 static void MC_HAL_YTM32_ApplyPwm(const mc_duty_cycle_t *duty_cycle)
 {
+    eTMR_ClearLdok(s_etmr_base);
     MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_A_HIGH_CH, duty_cycle->duty_a);
     MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_B_HIGH_CH, duty_cycle->duty_b);
     MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_C_HIGH_CH, duty_cycle->duty_c);

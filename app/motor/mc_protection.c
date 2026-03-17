@@ -48,12 +48,14 @@ uint32_t MC_Protection_Run(mc_protection_t *protection,
         protection->fault_mask |= MC_FAULT_OVERVOLTAGE;
     }
 
-    if (temperature_c > protection->config.over_temp_c)
+    if (protection->config.enable_over_temperature &&
+        (temperature_c > protection->config.over_temp_c))
     {
         protection->fault_mask |= MC_FAULT_OVERTEMPERATURE;
     }
 
     phase_loss_candidate =
+        protection->config.enable_phase_loss &&
         (MC_Math_Abs(iq_reference_a) >= protection->config.phase_loss_current_a) &&
         (MC_Math_Abs(speed_rpm) >= protection->config.phase_loss_speed_rpm) &&
         ((ia_abs < (0.4f * protection->config.phase_loss_current_a)) ||

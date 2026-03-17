@@ -137,7 +137,11 @@ static const mc_config_params_t s_user_params =
         .over_temp_c = 110.0f,
         .phase_loss_current_a = 2.0f,
         .phase_loss_speed_rpm = 600.0f,
-        .phase_loss_hold_time_s = 0.08f
+        .phase_loss_hold_time_s = 0.08f,
+        /* Debug stage: keep current/bus protection, disable temperature fault temporarily. */
+        .enable_over_temperature = false,
+        /* Debug stage: phase-loss diagnosis is disabled until current reconstruction is stable. */
+        .enable_phase_loss = false
     },
 
     .command =

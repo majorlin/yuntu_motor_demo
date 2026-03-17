@@ -142,8 +142,8 @@ void MC_Motor_Init(mc_motor_t *motor, const mc_hal_ops_t *hal, const mc_user_con
     motor->input_request.hall_state = 0U;
     motor->vbus_v = 0.0f;
     motor->temperature_c = 25.0f;
-    MC_PI_Init(&motor->id_pi, &config->user.control.id);
-    MC_PI_Init(&motor->iq_pi, &config->user.control.iq);
+    MC_PI_Init(&motor->id_pi, &config->derived.id_pi);
+    MC_PI_Init(&motor->iq_pi, &config->derived.iq_pi);
     MC_PI_Init(&motor->speed_pi, &config->user.control.speed);
     MC_Ramp_Init(&motor->speed_ramp,
                  config->user.command.speed_ramp_rpm_per_s,

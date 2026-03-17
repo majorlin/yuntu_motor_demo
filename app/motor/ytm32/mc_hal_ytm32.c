@@ -9,6 +9,7 @@
 #include "pins_driver.h"
 #include "sdk_project_config.h"
 #include "system_YTM32B1ME0.h"
+#include "tmu_driver.h"
 
 #define MC_HAL_PWM_A_HIGH_CH 0U
 #define MC_HAL_PWM_A_LOW_CH 1U
@@ -16,6 +17,8 @@
 #define MC_HAL_PWM_B_LOW_CH 5U
 #define MC_HAL_PWM_C_HIGH_CH 6U
 #define MC_HAL_PWM_C_LOW_CH 7U
+#define MC_HAL_ADC_TRIGGER_CH MC_HAL_PWM_A_LOW_CH
+#define MC_HAL_TMU_INSTANCE 0U
 
 #define MC_HAL_LED1_PIN 3U
 #define MC_HAL_LED2_PIN 2U
@@ -37,10 +40,30 @@ static uint32_t s_etmr_instance;
 static uint32_t s_adc_instance;
 static eTMR_Type *s_etmr_base;
 static etmr_state_t s_etmr_state;
+static etmr_trig_ch_param_t s_adc_trigger_channel_config[1] =
+{
+    {
+        .channelId = MC_HAL_ADC_TRIGGER_CH,
+        .channelVal0MatchTrigEn = true,
+        .channelVal1MatchTrigEn = false
+    }
+};
 
-static void MC_HAL_YTM32_WritePair(uint8_t high_channel,
-                                   uint8_t low_channel,
-                                   float duty_cycle)
+static void MC_HAL_YTM32_SetAdcTriggerPoint(void)
+{
+    uint32_t trigger_tick;
+
+    trigger_tick = s_pwm_period_ticks / 2U;
+    if (trigger_tick >= s_pwm_period_ticks)
+    {
+        trigger_tick = (s_pwm_period_ticks > 0U) ? (s_pwm_period_ticks - 1U) : 0U;
+    }
+
+    eTMR_SetChnVal0(s_etmr_base, MC_HAL_ADC_TRIGGER_CH, trigger_tick);
+    eTMR_SetChnVal1(s_etmr_base, MC_HAL_ADC_TRIGGER_CH, trigger_tick);
+}
+
+static void MC_HAL_YTM32_WritePwmChannel(uint8_t pwm_channel, float duty_cycle)
 {
     uint32_t half_period;
     uint32_t pulse_half_ticks;
@@ -70,10 +93,13 @@ static void MC_HAL_YTM32_WritePair(uint8_t high_channel,
         val1 = s_pwm_period_ticks;
     }
 
-    eTMR_SetChnVal0(s_etmr_base, high_channel, val0);
-    eTMR_SetChnVal1(s_etmr_base, high_channel, val1);
-    eTMR_SetChnVal0(s_etmr_base, low_channel, val0);
-    eTMR_SetChnVal1(s_etmr_base, low_channel, val1);
+    eTMR_SetChnVal0(s_etmr_base, pwm_channel, val0);
+    eTMR_SetChnVal1(s_etmr_base, pwm_channel, val1);
+}
+
+static status_t MC_HAL_YTM32_InitTmu(void)
+{
+    return TMU_DRV_Init(MC_HAL_TMU_INSTANCE, &tmu_config0);
 }
 
 static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
@@ -103,10 +129,10 @@ static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
     trig_config.outputTrigWidth = 1U;
     trig_config.outputTrigFreq = 1U;
     trig_config.modMatchTrigEnable = false;
-    trig_config.midMatchTrigEnable = true;
+    trig_config.midMatchTrigEnable = false;
     trig_config.initMatchTrigEnable = false;
-    trig_config.numOfChannels = 0U;
-    trig_config.channelTrigParamConfig = 0;
+    trig_config.numOfChannels = 1U;
+    trig_config.channelTrigParamConfig = s_adc_trigger_channel_config;
 
     etmr_config.etmrClockSource = eTMR_CLOCK_SOURCE_INTERNALCLK;
     etmr_config.etmrPrescaler = 1U;
@@ -132,12 +158,12 @@ static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
         s_pwm_period_ticks = 1U;
     }
 
-    (void)eTMR_DRV_SetCounterInit(s_etmr_instance, 0U, false);
-    (void)eTMR_DRV_SetCounterMod(s_etmr_instance, s_pwm_period_ticks, false);
+    s_etmr_base->MOD = s_pwm_period_ticks;
+    s_etmr_base->INIT = 0U;
 #if FEATURE_eTMR_HAS_MID
-    (void)eTMR_DRV_SetCounterMid(s_etmr_instance, s_pwm_period_ticks / 2U);
+    s_etmr_base->MID = s_pwm_period_ticks / 2U;
 #endif
-    (void)eTMR_DRV_SetSafeState(s_etmr_instance, 0x0000U);
+    s_etmr_base->CHFV = 0x0000U;
 
     for (channel = 0U; channel < FEATURE_eTMR_CHANNEL_MAX_COUNT; channel++)
     {
@@ -161,9 +187,10 @@ static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
     eTMR_SetChnDeadtime(s_etmr_base, MC_HAL_PWM_B_HIGH_CH, config->derived.deadtime_ticks);
     eTMR_SetChnDeadtime(s_etmr_base, MC_HAL_PWM_C_HIGH_CH, config->derived.deadtime_ticks);
 
-    MC_HAL_YTM32_WritePair(MC_HAL_PWM_A_HIGH_CH, MC_HAL_PWM_A_LOW_CH, 0.5f);
-    MC_HAL_YTM32_WritePair(MC_HAL_PWM_B_HIGH_CH, MC_HAL_PWM_B_LOW_CH, 0.5f);
-    MC_HAL_YTM32_WritePair(MC_HAL_PWM_C_HIGH_CH, MC_HAL_PWM_C_LOW_CH, 0.5f);
+    MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_A_HIGH_CH, 0.5f);
+    MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_B_HIGH_CH, 0.5f);
+    MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_C_HIGH_CH, 0.5f);
+    MC_HAL_YTM32_SetAdcTriggerPoint();
 
     eTMR_SetLdok(s_etmr_base);
     eTMR_GenSoftwareTrigger(s_etmr_base, true);
@@ -181,7 +208,6 @@ static status_t MC_HAL_YTM32_InitAdc(const mc_user_config_t *config)
 
     s_adc_instance = config->user.hardware.adc_instance;
     ADC_DRV_InitConverterStruct(&adc_config);
-    adc_config.triggerSource = config->user.hardware.adc_trigger_source;
     adc_config.trigger = ADC_TRIGGER_HARDWARE;
     adc_config.sequenceConfig.channels[0] = MC_HAL_ADC_CH_IA;
     adc_config.sequenceConfig.channels[1] = MC_HAL_ADC_CH_IB;
@@ -206,16 +232,22 @@ static status_t MC_HAL_YTM32_Init(const mc_user_config_t *config)
     SystemCoreClockUpdate();
     s_fast_loop_callback = 0;
     s_fault_callback = 0;
+    CIM->CTRL |= CIM_CTRL_ADC0_TRIG_SEL(1);
+    if (MC_HAL_YTM32_InitAdc(config) != STATUS_SUCCESS)
+    {
+        return STATUS_ERROR;
+    }
 
     if (MC_HAL_YTM32_InitPwm(config) != STATUS_SUCCESS)
     {
         return STATUS_ERROR;
     }
 
-    if (MC_HAL_YTM32_InitAdc(config) != STATUS_SUCCESS)
+    if (MC_HAL_YTM32_InitTmu() != STATUS_SUCCESS)
     {
         return STATUS_ERROR;
     }
+
 
     OSIF_TimeDelay(0U);
     return STATUS_SUCCESS;
@@ -241,9 +273,10 @@ static void MC_HAL_YTM32_EnableOutputs(bool enable)
 
 static void MC_HAL_YTM32_ApplyPwm(const mc_duty_cycle_t *duty_cycle)
 {
-    MC_HAL_YTM32_WritePair(MC_HAL_PWM_A_HIGH_CH, MC_HAL_PWM_A_LOW_CH, duty_cycle->duty_a);
-    MC_HAL_YTM32_WritePair(MC_HAL_PWM_B_HIGH_CH, MC_HAL_PWM_B_LOW_CH, duty_cycle->duty_b);
-    MC_HAL_YTM32_WritePair(MC_HAL_PWM_C_HIGH_CH, MC_HAL_PWM_C_LOW_CH, duty_cycle->duty_c);
+    MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_A_HIGH_CH, duty_cycle->duty_a);
+    MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_B_HIGH_CH, duty_cycle->duty_b);
+    MC_HAL_YTM32_WritePwmChannel(MC_HAL_PWM_C_HIGH_CH, duty_cycle->duty_c);
+    MC_HAL_YTM32_SetAdcTriggerPoint();
     eTMR_SetLdok(s_etmr_base);
 }
 

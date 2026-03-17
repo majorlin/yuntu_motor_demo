@@ -36,6 +36,8 @@
 
 - `SysTick` runs at 1 kHz and provides the slow-loop heartbeat.
 - `eTMR0` runs continuously, even while outputs are masked.
+- `eTMR0_CH1` reserves `VAL0/VAL1` as ADC trigger compare points in complementary mode.
+- `TMU0` routes `eTMR0_EXT_TRIG` to `ADC0_EXT_TRIG`.
 - `eTMR0` generates ADC trigger pulses near the PWM center.
 - `ADC0_IRQHandler` is the fast loop:
   - Read dual-shunt samples and DC bus / temperature samples

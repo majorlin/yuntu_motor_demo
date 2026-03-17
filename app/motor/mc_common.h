@@ -132,6 +132,7 @@ typedef struct
     mc_pi_gains_t id;
     mc_pi_gains_t iq;
     mc_pi_gains_t speed;
+    float current_pi_bandwidth_hz;
     float current_loop_hz;
     float speed_loop_hz;
     float voltage_utilization;
@@ -179,7 +180,6 @@ typedef struct
 {
     uint32_t etmr_instance;
     uint32_t adc_instance;
-    uint8_t adc_trigger_source;
     uint32_t pwm_frequency_hz;
     float deadtime_ns;
     float min_duty;
@@ -211,6 +211,8 @@ typedef struct
     float current_loop_dt_s;
     float speed_loop_dt_s;
     float ls_avg_h;
+    mc_pi_gains_t id_pi;
+    mc_pi_gains_t iq_pi;
     uint16_t current_offset_default_raw;
     uint16_t deadtime_ticks;
 } mc_derived_params_t;

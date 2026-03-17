@@ -25,12 +25,15 @@ static const clock_names_t s_etmr_clock_names[eTMR_INSTANCE_COUNT] = eTMR_IPC_CL
  * - temperature_sensor_voltage_at_25c_v / temperature_sensor_slope_v_per_c:
  *   Linear temperature sensor model seen by ADC.
  *   If your board uses NTC, this can be replaced later by a table/model module.
- * - adc_trigger_source:
- *   ADC hardware trigger mux selection. It must match the eTMR trigger route in the RM.
  * - pwm_frequency_hz:
  *   PWM carrier frequency.
  * - deadtime_ns:
  *   Required high/low complementary deadtime on gate drive side.
+ *
+ * Current board trigger route:
+ * - ADC hardware trigger is fixed to eTMR0 CH1 matching event through TMU.
+ * - In complementary PWM mode, CH1 VAL0/VAL1 are reserved for ADC trigger timing.
+ * - User no longer needs to configure an ADC trigger mux parameter.
  */
 static const mc_config_params_t s_user_params =
 {
@@ -42,37 +45,45 @@ static const mc_config_params_t s_user_params =
     .motor =
     {
         /* Number of motor pole pairs. Mechanical/electrical speed conversion depends on it. */
-        .pole_pairs = 7U,
+        .pole_pairs = 4U,
         /* Phase resistance in ohm, line-neutral equivalent used by observer/decoupling. */
-        .rs_ohm = 0.18f,
-        /* D-axis inductance in henry. */
-        .ld_h = 0.00018f,
-        /* Q-axis inductance in henry. */
-        .lq_h = 0.00018f,
-        /* Flux linkage in V*s, used later by flux/speed related strategies. */
-        .flux_linkage_v_s = 0.012f,
+        .rs_ohm = 0.05f,
+        /* D-axis inductance in henry. Here Ld uses the measured phase inductance value. */
+        .ld_h = 0.00045158f,
+        /* Q-axis inductance in henry. Here Lq uses the measured phase inductance value. */
+        .lq_h = 0.00045158f,
+        /*
+         * Flux linkage estimated from line-line back-EMF test:
+         * lambda ~= Vab_pp / (2 * sqrt(3) * 2 * pi * fe)
+         *        ~= 28.6 / (2 * 1.732 * 2 * pi * 385)
+         *        ~= 0.00341 V*s
+         */
+        .flux_linkage_v_s = 0.00341f,
         /* Continuous or software-limited peak phase current. */
         .max_phase_current_a = 10.0f,
         /* Nominal DC bus voltage of your power stage. */
         .rated_bus_voltage_v = 24.0f,
-        /* Intended maximum mechanical speed. */
-        .max_mech_speed_rpm = 4000.0f
+        /*
+         * Reference maximum mechanical speed from the same back-EMF test:
+         * n ~= fe / pole_pairs * 60 = 385 / 4 * 60 = 5775 rpm
+         */
+        .max_mech_speed_rpm = 5800.0f
     },
 
     .feedback =
     {
         /* ADC reference voltage. */
-        .adc_reference_voltage_v = 3.3f,
+        .adc_reference_voltage_v = 5.0f,
         /* ADC full-scale count for 12-bit converter. */
         .adc_full_scale = 4095U,
         /* Current sampling shunt resistor. */
-        .current_shunt_resistor_ohm = 0.01f,
+        .current_shunt_resistor_ohm = 0.005f,
         /* Current amplifier gain from shunt to ADC input. */
-        .current_amplifier_gain = 20.625f,
+        .current_amplifier_gain = 10.0f,
         /* DC bus divider top resistor. */
-        .vbus_divider_upper_resistor_ohm = 91000.0f,
+        .vbus_divider_upper_resistor_ohm = 4000.0f,
         /* DC bus divider bottom resistor. */
-        .vbus_divider_lower_resistor_ohm = 10000.0f,
+        .vbus_divider_lower_resistor_ohm = 1000.0f,
         /* ADC input voltage when temperature is 25 C. */
         .temperature_sensor_voltage_at_25c_v = 2.015f,
         /* Sensor slope in V/C. Positive means voltage rises with temperature. */
@@ -81,9 +92,17 @@ static const mc_config_params_t s_user_params =
 
     .control =
     {
-        .id = {2.0f, 400.0f, 12.0f},
-        .iq = {2.0f, 400.0f, 12.0f},
+        /*
+         * Id/Iq current PI gains are auto-derived in MC_UserParams_Load():
+         * Kp = L * 2 * pi * fc
+         * Ki = R * 2 * pi * fc
+         * Only the output_limit here is user-configured.
+         */
+        .id = {0.0f, 0.0f, 12.0f},
+        .iq = {0.0f, 0.0f, 12.0f},
         .speed = {0.012f, 0.40f, 6.0f},
+        /* Conservative initial current-loop design bandwidth for first power-up debug. */
+        .current_pi_bandwidth_hz = 1000.0f,
         .current_loop_hz = 20000.0f,
         .speed_loop_hz = 1000.0f,
         .voltage_utilization = 0.92f
@@ -114,7 +133,7 @@ static const mc_config_params_t s_user_params =
     {
         .over_current_a = 12.0f,
         .under_voltage_v = 10.0f,
-        .over_voltage_v = 30.0f,
+        .over_voltage_v = 24.0f,
         .over_temp_c = 110.0f,
         .phase_loss_current_a = 2.0f,
         .phase_loss_speed_rpm = 600.0f,
@@ -133,8 +152,6 @@ static const mc_config_params_t s_user_params =
         .etmr_instance = 0U,
         /* Current board uses ADC0 for current/bus/temp sampling. */
         .adc_instance = 0U,
-        /* ADC trigger mux index, must match the SoC trigger routing. */
-        .adc_trigger_source = 0U,
         /* PWM carrier frequency. */
         .pwm_frequency_hz = 20000U,
         /* Deadtime requirement at gate drive, in nanoseconds. */
@@ -151,6 +168,7 @@ status_t MC_UserParams_Load(mc_user_config_t *config)
     float adc_lsb_voltage_v;
     float current_denominator;
     float temperature_slope;
+    float current_pi_omega_rad_s;
     float deadtime_tick_f;
     float etmr_clock_hz_f;
     uint32_t etmr_clock_hz;
@@ -171,6 +189,7 @@ status_t MC_UserParams_Load(mc_user_config_t *config)
     if ((current_denominator <= 0.0f) ||
         (config->user.feedback.vbus_divider_lower_resistor_ohm <= 0.0f) ||
         (temperature_slope == 0.0f) ||
+        (config->user.control.current_pi_bandwidth_hz <= 0.0f) ||
         (config->user.control.current_loop_hz <= 0.0f) ||
         (config->user.control.speed_loop_hz <= 0.0f))
     {
@@ -190,6 +209,13 @@ status_t MC_UserParams_Load(mc_user_config_t *config)
     config->derived.current_loop_dt_s = 1.0f / config->user.control.current_loop_hz;
     config->derived.speed_loop_dt_s = 1.0f / config->user.control.speed_loop_hz;
     config->derived.ls_avg_h = 0.5f * (config->user.motor.ld_h + config->user.motor.lq_h);
+    current_pi_omega_rad_s = MC_TWO_PI_F * config->user.control.current_pi_bandwidth_hz;
+    config->derived.id_pi.kp = config->user.motor.ld_h * current_pi_omega_rad_s;
+    config->derived.id_pi.ki = config->user.motor.rs_ohm * current_pi_omega_rad_s;
+    config->derived.id_pi.output_limit = config->user.control.id.output_limit;
+    config->derived.iq_pi.kp = config->user.motor.lq_h * current_pi_omega_rad_s;
+    config->derived.iq_pi.ki = config->user.motor.rs_ohm * current_pi_omega_rad_s;
+    config->derived.iq_pi.output_limit = config->user.control.iq.output_limit;
     config->derived.current_offset_default_raw = config->user.feedback.adc_full_scale / 2U;
 
     etmr_clock_hz = 0U;

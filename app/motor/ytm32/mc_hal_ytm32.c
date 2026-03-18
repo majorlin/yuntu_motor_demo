@@ -51,16 +51,9 @@ static etmr_trig_ch_param_t s_adc_trigger_channel_config[1] =
 
 static void MC_HAL_YTM32_SetAdcTriggerPoint(void)
 {
-    uint32_t trigger_tick;
 
-    trigger_tick = s_pwm_period_ticks / 2U;
-    if (trigger_tick >= s_pwm_period_ticks)
-    {
-        trigger_tick = (s_pwm_period_ticks > 0U) ? (s_pwm_period_ticks - 1U) : 0U;
-    }
-
-    eTMR_SetChnVal0(s_etmr_base, MC_HAL_ADC_TRIGGER_CH, trigger_tick);
-    eTMR_SetChnVal1(s_etmr_base, MC_HAL_ADC_TRIGGER_CH, trigger_tick);
+    eTMR_SetChnVal0(s_etmr_base, MC_HAL_ADC_TRIGGER_CH, 0);
+    eTMR_SetChnVal1(s_etmr_base, MC_HAL_ADC_TRIGGER_CH, 0);
 }
 
 static void MC_HAL_YTM32_WritePwmChannel(uint8_t pwm_channel, float duty_cycle)
@@ -205,10 +198,16 @@ static status_t MC_HAL_YTM32_InitPwm(const mc_user_config_t *config)
 static status_t MC_HAL_YTM32_InitAdc(const mc_user_config_t *config)
 {
     adc_converter_config_t adc_config;
+    /* FOR DEBUG */
+    PINS_DRV_SetMuxModeSel(PCTRLC, 7, PCTRL_MUX_AS_GPIO);
+    PINS_DRV_SetPinDirection(GPIOC, 7, GPIO_OUTPUT_DIRECTION);
 
     s_adc_instance = config->user.hardware.adc_instance;
     ADC_DRV_InitConverterStruct(&adc_config);
     adc_config.trigger = ADC_TRIGGER_HARDWARE;
+    adc_config.clockDivider = 0U;
+    adc_config.startTime = 40U;
+    adc_config.sampleTime = 4U;
     adc_config.sequenceConfig.channels[0] = MC_HAL_ADC_CH_IA;
     adc_config.sequenceConfig.channels[1] = MC_HAL_ADC_CH_IB;
     adc_config.sequenceConfig.channels[2] = MC_HAL_ADC_CH_VBUS;
@@ -344,6 +343,8 @@ const mc_hal_ops_t g_mc_hal_ytm32_ops =
 void ADC0_IRQHandler(void)
 {
     mc_adc_sample_t sample;
+    /* FOR DEBUG */
+    PINS_DRV_WritePin(GPIOC, 7, 1U);
 
     if (ADC_DRV_GetOvrRunOfConversionFlag(s_adc_instance))
     {
@@ -370,6 +371,8 @@ void ADC0_IRQHandler(void)
     {
         s_fast_loop_callback(&sample);
     }
+    /* FOR DEBUG */
+    PINS_DRV_WritePin(GPIOC, 7, 0U);
 }
 
 void eTMR0_Fault_IRQHandler(void)

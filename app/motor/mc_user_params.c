@@ -119,9 +119,9 @@ static const mc_config_params_t s_user_params =
 
     .forced_drag =
     {
-        .align_current_a = 1.8f,
+        .align_current_a = 0.4f,
         .align_time_s = 0.18f,
-        .drag_current_a = 2.4f,
+        .drag_current_a = 0.8f,
         .start_electrical_hz = 2.0f,
         .target_electrical_hz = 45.0f,
         .acceleration_hz_per_s = 220.0f,
@@ -212,6 +212,14 @@ status_t MC_UserParams_Load(mc_user_config_t *config)
         25.0f - (config->user.feedback.temperature_sensor_voltage_at_25c_v / temperature_slope);
     config->derived.current_loop_dt_s = 1.0f / config->user.control.current_loop_hz;
     config->derived.speed_loop_dt_s = 1.0f / config->user.control.speed_loop_hz;
+    config->derived.electrical_speed_to_mech_rpm =
+        (config->user.motor.pole_pairs > 0U) ?
+        (60.0f / (MC_TWO_PI_F * (float)config->user.motor.pole_pairs)) :
+        0.0f;
+    config->derived.mech_rpm_to_electrical_speed_rad_s =
+        (config->user.motor.pole_pairs > 0U) ?
+        (MC_TWO_PI_F * (float)config->user.motor.pole_pairs / 60.0f) :
+        0.0f;
     config->derived.ls_avg_h = 0.5f * (config->user.motor.ld_h + config->user.motor.lq_h);
     current_pi_omega_rad_s = MC_TWO_PI_F * config->user.control.current_pi_bandwidth_hz;
     config->derived.id_pi.kp = config->user.motor.ld_h * current_pi_omega_rad_s;
@@ -220,6 +228,11 @@ status_t MC_UserParams_Load(mc_user_config_t *config)
     config->derived.iq_pi.kp = config->user.motor.lq_h * current_pi_omega_rad_s;
     config->derived.iq_pi.ki = config->user.motor.rs_ohm * current_pi_omega_rad_s;
     config->derived.iq_pi.output_limit = config->user.control.iq.output_limit;
+    config->derived.speed_pi.kp =
+        config->user.control.speed.kp * config->derived.electrical_speed_to_mech_rpm;
+    config->derived.speed_pi.ki =
+        config->user.control.speed.ki * config->derived.electrical_speed_to_mech_rpm;
+    config->derived.speed_pi.output_limit = config->user.control.speed.output_limit;
     config->derived.current_offset_default_raw = config->user.feedback.adc_full_scale / 2U;
 
     etmr_clock_hz = 0U;

@@ -84,7 +84,7 @@ static void MC_Motor_RunCurrentLoop(mc_motor_t *motor, float electrical_angle_ra
     float sin_theta;
     float cos_theta;
     float voltage_limit_v;
-    mc_svpwm_result_t svm_result;
+    static mc_svpwm_result_t svm_result;
 
     MC_Math_FastSinCos(electrical_angle_rad, &sin_theta, &cos_theta);
     MC_Math_Park(&motor->phase_currents_ab, sin_theta, cos_theta, &motor->phase_currents_dq);
@@ -115,6 +115,25 @@ static void MC_Motor_RunCurrentLoop(mc_motor_t *motor, float electrical_angle_ra
     motor->hal->apply_pwm(&svm_result.duty);
 }
 
+static void MC_Motor_UpdateSpeedFeedback(mc_motor_t *motor)
+{
+    motor->speed_feedback_rpm =
+        motor->electrical_speed_rad_s * motor->config.derived.electrical_speed_to_mech_rpm;
+}
+
+static void MC_Motor_RunSpeedLoop(mc_motor_t *motor)
+{
+    motor->id_reference_a = 0.0f;
+    motor->iq_reference_a = MC_PI_Run(&motor->speed_pi,
+                                      motor->speed_command_rad_s,
+                                      motor->electrical_speed_rad_s,
+                                      0.0f,
+                                      motor->last_slow_loop_ts_s);
+    motor->iq_reference_a = MC_Math_Clamp(motor->iq_reference_a,
+                                          -motor->config.user.motor.max_phase_current_a,
+                                          motor->config.user.motor.max_phase_current_a);
+}
+
 void MC_Motor_Init(mc_motor_t *motor, const mc_hal_ops_t *hal, const mc_user_config_t *config)
 {
     motor->hal = hal;
@@ -129,7 +148,7 @@ void MC_Motor_Init(mc_motor_t *motor, const mc_hal_ops_t *hal, const mc_user_con
     motor->outputs_enabled = false;
     motor->handover_active = false;
     motor->handover_blend = 0.0f;
-    motor->speed_command_rpm = 0.0f;
+    motor->speed_command_rad_s = 0.0f;
     motor->speed_feedback_rpm = 0.0f;
     motor->iq_reference_a = 0.0f;
     motor->id_reference_a = 0.0f;
@@ -144,7 +163,7 @@ void MC_Motor_Init(mc_motor_t *motor, const mc_hal_ops_t *hal, const mc_user_con
     motor->temperature_c = 25.0f;
     MC_PI_Init(&motor->id_pi, &config->derived.id_pi);
     MC_PI_Init(&motor->iq_pi, &config->derived.iq_pi);
-    MC_PI_Init(&motor->speed_pi, &config->user.control.speed);
+    MC_PI_Init(&motor->speed_pi, &config->derived.speed_pi);
     MC_Ramp_Init(&motor->speed_ramp,
                  config->user.command.speed_ramp_rpm_per_s,
                  config->user.command.speed_ramp_rpm_per_s,
@@ -160,9 +179,8 @@ void MC_Motor_Init(mc_motor_t *motor, const mc_hal_ops_t *hal, const mc_user_con
 
 void MC_Motor_FastLoop(mc_motor_t *motor, const mc_adc_sample_t *sample)
 {
-    mc_startup_output_t startup_output;
+    static mc_startup_output_t startup_output;
     float electrical_angle;
-    float commanded_speed_rpm;
     float handover_error;
     float dt_s;
 
@@ -178,22 +196,18 @@ void MC_Motor_FastLoop(mc_motor_t *motor, const mc_adc_sample_t *sample)
     MC_Motor_UpdateMeasurements(motor, sample);
     MC_Observer_Run(&motor->observer, &motor->voltage_command_ab, &motor->phase_currents_ab, dt_s);
     motor->electrical_speed_rad_s = motor->observer.output.speed_rad_s;
-    motor->speed_feedback_rpm =
-        (motor->config.user.motor.pole_pairs > 0U) ?
-        ((motor->observer.output.speed_rad_s * 60.0f) / (MC_TWO_PI_F * (float)motor->config.user.motor.pole_pairs)) :
-        0.0f;
 
     motor->fault_mask |= MC_Protection_Run(&motor->protection,
                                            &motor->phase_currents_abc,
                                            motor->iq_reference_a,
-                                           motor->speed_feedback_rpm,
+                                           motor->electrical_speed_rad_s,
                                            motor->vbus_v,
                                            motor->temperature_c,
                                            dt_s);
     if (motor->fault_mask != MC_FAULT_NONE)
     {
-        MC_Motor_EnterState(motor, MC_STATE_FAULT);
-        return;
+        // MC_Motor_EnterState(motor, MC_STATE_FAULT);
+        // return;
     }
 
     if (!motor->input_request.run_request)
@@ -257,16 +271,6 @@ void MC_Motor_FastLoop(mc_motor_t *motor, const mc_adc_sample_t *sample)
             return;
         }
 
-        commanded_speed_rpm = motor->speed_command_rpm;
-        motor->id_reference_a = 0.0f;
-        motor->iq_reference_a = MC_PI_Run(&motor->speed_pi,
-                                          commanded_speed_rpm,
-                                          motor->speed_feedback_rpm,
-                                          0.0f,
-                                          motor->last_slow_loop_ts_s);
-        motor->iq_reference_a = MC_Math_Clamp(motor->iq_reference_a,
-                                              -motor->config.user.motor.max_phase_current_a,
-                                              motor->config.user.motor.max_phase_current_a);
         motor->electrical_angle_rad = motor->observer.output.theta_rad;
         MC_Motor_RunCurrentLoop(motor, motor->electrical_angle_rad);
     }
@@ -292,7 +296,15 @@ void MC_Motor_Background(mc_motor_t *motor)
     target_speed_rpm = motor->input_request.run_request ?
         ((float)motor->input_request.direction * motor->config.user.command.default_speed_rpm) :
         0.0f;
-    motor->speed_command_rpm = MC_Ramp_Run(&motor->speed_ramp, target_speed_rpm, dt_s);
+    target_speed_rpm = MC_Ramp_Run(&motor->speed_ramp, target_speed_rpm, dt_s);
+    motor->speed_command_rad_s =
+        target_speed_rpm * motor->config.derived.mech_rpm_to_electrical_speed_rad_s;
+    MC_Motor_UpdateSpeedFeedback(motor);
+
+    if (motor->state == MC_STATE_RUN)
+    {
+        MC_Motor_RunSpeedLoop(motor);
+    }
 
     if ((motor->state == MC_STATE_FAULT) && !motor->input_request.run_request)
     {

@@ -212,9 +212,12 @@ typedef struct
     float temp_c_offset;
     float current_loop_dt_s;
     float speed_loop_dt_s;
+    float electrical_speed_to_mech_rpm;
+    float mech_rpm_to_electrical_speed_rad_s;
     float ls_avg_h;
     mc_pi_gains_t id_pi;
     mc_pi_gains_t iq_pi;
+    mc_pi_gains_t speed_pi;
     uint16_t current_offset_default_raw;
     uint16_t deadtime_ticks;
 } mc_derived_params_t;

@@ -4,6 +4,8 @@
 void MC_Protection_Init(mc_protection_t *protection, const mc_user_config_t *config)
 {
     protection->config = config->user.protection;
+    protection->phase_loss_speed_rad_s =
+        config->user.protection.phase_loss_speed_rpm * config->derived.mech_rpm_to_electrical_speed_rad_s;
     MC_Protection_Reset(protection);
 }
 
@@ -16,7 +18,7 @@ void MC_Protection_Reset(mc_protection_t *protection)
 uint32_t MC_Protection_Run(mc_protection_t *protection,
                            const mc_abc_t *currents_abc,
                            float iq_reference_a,
-                           float speed_rpm,
+                           float electrical_speed_rad_s,
                            float vbus_v,
                            float temperature_c,
                            float dt_s)
@@ -57,7 +59,7 @@ uint32_t MC_Protection_Run(mc_protection_t *protection,
     phase_loss_candidate =
         protection->config.enable_phase_loss &&
         (MC_Math_Abs(iq_reference_a) >= protection->config.phase_loss_current_a) &&
-        (MC_Math_Abs(speed_rpm) >= protection->config.phase_loss_speed_rpm) &&
+        (MC_Math_Abs(electrical_speed_rad_s) >= protection->phase_loss_speed_rad_s) &&
         ((ia_abs < (0.4f * protection->config.phase_loss_current_a)) ||
          (ib_abs < (0.4f * protection->config.phase_loss_current_a)) ||
          (ic_abs < (0.4f * protection->config.phase_loss_current_a)));

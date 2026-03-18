@@ -23,7 +23,7 @@ typedef struct
     bool outputs_enabled;
     bool handover_active;
     float handover_blend;
-    float speed_command_rpm;
+    float speed_command_rad_s;
     float speed_feedback_rpm;
     float iq_reference_a;
     float id_reference_a;

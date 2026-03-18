@@ -55,9 +55,13 @@ static void MC_Motor_EnterState(mc_motor_t *motor, mc_state_t state)
 static void MC_Motor_UpdateMeasurements(mc_motor_t *motor, const mc_adc_sample_t *sample)
 {
     motor->phase_currents_abc.a =
-        ((float)sample->current_a_raw - (float)motor->current_a_offset_raw) * motor->config.derived.current_a_per_count;
+        ((float)sample->current_a_raw - (float)motor->current_a_offset_raw) *
+        motor->config.derived.current_a_per_count *
+        motor->config.user.feedback.current_a_polarity;
     motor->phase_currents_abc.b =
-        ((float)sample->current_b_raw - (float)motor->current_b_offset_raw) * motor->config.derived.current_a_per_count;
+        ((float)sample->current_b_raw - (float)motor->current_b_offset_raw) *
+        motor->config.derived.current_a_per_count *
+        motor->config.user.feedback.current_b_polarity;
     motor->phase_currents_abc.c = -motor->phase_currents_abc.a - motor->phase_currents_abc.b;
     motor->vbus_v = (float)sample->vbus_raw * motor->config.derived.vbus_v_per_count;
     motor->temperature_c =
@@ -235,7 +239,9 @@ void MC_Motor_FastLoop(mc_motor_t *motor, const mc_adc_sample_t *sample)
             startup_output.iq_ref_a = -startup_output.iq_ref_a;
         }
 
-        if (startup_output.observer_handover_ready)
+        handover_error = MC_Math_WrapDelta(motor->observer.output.theta_rad - electrical_angle);
+        if (startup_output.observer_handover_ready &&
+            (MC_Math_Abs(handover_error) <= motor->config.user.forced_drag.handover_max_angle_error_rad))
         {
             if (!motor->handover_active)
             {
@@ -243,15 +249,19 @@ void MC_Motor_FastLoop(mc_motor_t *motor, const mc_adc_sample_t *sample)
                 motor->handover_blend = 0.0f;
             }
 
-            handover_error = MC_Math_WrapDelta(motor->observer.output.theta_rad - electrical_angle);
             motor->handover_blend += dt_s / motor->config.user.forced_drag.observer_blend_time_s;
             motor->handover_blend = MC_Math_Clamp(motor->handover_blend, 0.0f, 1.0f);
             electrical_angle = MC_Math_WrapAngle(electrical_angle + (motor->handover_blend * handover_error));
-            if (motor->handover_blend >= 1.0f)
+            if (motor->handover_blend >= 0.5f)
             {
                 MC_Motor_EnterState(motor, MC_STATE_RUN);
                 electrical_angle = motor->observer.output.theta_rad;
             }
+        }
+        else
+        {
+            motor->handover_active = false;
+            motor->handover_blend = 0.0f;
         }
 
         motor->electrical_angle_rad = electrical_angle;

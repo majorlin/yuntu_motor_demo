@@ -114,6 +114,8 @@ typedef struct
     uint16_t adc_full_scale;
     float current_shunt_resistor_ohm;
     float current_amplifier_gain;
+    float current_a_polarity;
+    float current_b_polarity;
     float vbus_divider_upper_resistor_ohm;
     float vbus_divider_lower_resistor_ohm;
     float temperature_sensor_voltage_at_25c_v;
@@ -145,6 +147,7 @@ typedef struct
     float emf_filter_hz;
     float speed_filter_hz;
     float valid_bemf_v;
+    float theta_offset_rad;
 } mc_smo_config_t;
 
 typedef struct
@@ -152,11 +155,14 @@ typedef struct
     float align_current_a;
     float align_time_s;
     float drag_current_a;
+    float drag_current_ramp_time_s;
     float start_electrical_hz;
     float target_electrical_hz;
+    float acceleration_time_s;
     float acceleration_hz_per_s;
     float observer_blend_time_s;
     float handover_electrical_hz;
+    float handover_max_angle_error_rad;
 } mc_forced_drag_config_t;
 
 typedef struct

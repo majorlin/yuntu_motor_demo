@@ -20,6 +20,7 @@ typedef struct
     float slide_gain;
     float slide_boundary_a;
     float valid_bemf_v;
+    float theta_offset_rad;
     mc_alpha_beta_t current_hat;
     mc_alpha_beta_t bemf;
     mc_lpf_t bemf_alpha_lpf;

@@ -19,6 +19,7 @@ void MC_Observer_Init(mc_observer_t *observer, const mc_user_config_t *config)
     observer->smo.slide_gain = config->user.smo.slide_gain;
     observer->smo.slide_boundary_a = config->user.smo.slide_boundary_a;
     observer->smo.valid_bemf_v = config->user.smo.valid_bemf_v;
+    observer->smo.theta_offset_rad = config->user.smo.theta_offset_rad;
     MC_LPF_Init(&observer->smo.bemf_alpha_lpf, config->user.smo.emf_filter_hz, observer->smo.dt_s, 0.0f);
     MC_LPF_Init(&observer->smo.bemf_beta_lpf, config->user.smo.emf_filter_hz, observer->smo.dt_s, 0.0f);
     MC_LPF_Init(&observer->smo.speed_lpf, config->user.smo.speed_filter_hz, observer->smo.dt_s, 0.0f);
@@ -79,7 +80,7 @@ void MC_Observer_Run(mc_observer_t *observer,
     smo->bemf.alpha = MC_LPF_Run(&smo->bemf_alpha_lpf, z_alpha);
     smo->bemf.beta = MC_LPF_Run(&smo->bemf_beta_lpf, z_beta);
 
-    theta_next = MC_Math_FastAtan2(-smo->bemf.alpha, smo->bemf.beta);
+    theta_next = MC_Math_WrapAngle(MC_Math_FastAtan2(-smo->bemf.alpha, smo->bemf.beta) + smo->theta_offset_rad);
     delta_theta = MC_Math_WrapDelta(theta_next - smo->theta_rad);
     speed_raw = delta_theta / dt_s;
     smo->theta_rad = theta_next;

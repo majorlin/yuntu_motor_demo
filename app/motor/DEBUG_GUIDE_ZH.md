@@ -161,6 +161,37 @@ Vbus_full_scale = Vref * (Rupper + Rlower) / Rlower
 - 让电机能稳定定向、低速拉起来即可。
 - 如果有明显抖动或反向拉扯，先查相序和电流极性。
 
+强拖参数更建议按“时间”和“电流爬升”来理解：
+
+- `align_current_a`：定向锁定电流，只负责把转子先拉到已知方向。
+- `align_time_s`：给锁定阶段留够时间，首次调试宁可略长一点。
+- `drag_current_a`：强拖阶段目标 `Iq`。
+- `drag_current_ramp_time_s`：`Iq` 从 `0` 线性爬到 `drag_current_a` 的时间，越长越不容易一启动就冲电流。
+- `start_electrical_hz`：强拖开始时的电角频率，建议从很小的值开始。
+- `target_electrical_hz`：强拖阶段最高电角频率。
+- `acceleration_time_s`：从 `start_electrical_hz` 拉到 `target_electrical_hz` 的总时间。
+- `handover_electrical_hz`：观测器开始接管的电角频率，建议明显低于 `target_electrical_hz`，但要高到反电势足够清晰。
+
+对应公式是：
+
+```text
+electrical_hz(t) = start_electrical_hz
+                 + (target_electrical_hz - start_electrical_hz) * clamp(t / acceleration_time_s, 0, 1)
+
+iq_ref(t) = drag_current_a * clamp(t / drag_current_ramp_time_s, 0, 1)
+
+angle(k+1) = angle(k) + 2 * pi * electrical_hz * Ts
+```
+
+如果你现在看到“电流快速增大、角度不像缓慢累加”，优先这样收参数：
+
+- 先降 `drag_current_a`
+- 拉长 `drag_current_ramp_time_s`
+- 降 `start_electrical_hz`
+- 降 `target_electrical_hz`
+- 拉长 `acceleration_time_s`
+- 把 `handover_electrical_hz` 暂时设得更低一些
+
 ### 第五步：再调 SMO 交接
 
 - 确认强拖阶段机械旋转平稳后，再看观测器 `theta/speed` 是否跟得上。

@@ -80,6 +80,13 @@ static const mc_config_params_t s_user_params =
         .current_shunt_resistor_ohm = 0.005f,
         /* Current amplifier gain from shunt to ADC input. */
         .current_amplifier_gain = 10.0f,
+        /*
+         * Current feedback polarity.
+         * Keep +1.0f if positive phase current makes ADC code rise above offset.
+         * If align stage commands +Id but measured Id runs negative, try setting both to -1.0f.
+         */
+        .current_a_polarity = -1.0f,
+        .current_b_polarity = -1.0f,
         /* DC bus divider top resistor. */
         .vbus_divider_upper_resistor_ohm = 4000.0f,
         /* DC bus divider bottom resistor. */
@@ -114,19 +121,35 @@ static const mc_config_params_t s_user_params =
         .slide_boundary_a = 1.0f,
         .emf_filter_hz = 1200.0f,
         .speed_filter_hz = 250.0f,
-        .valid_bemf_v = 0.4f
+        .valid_bemf_v = 0.4f,
+        /*
+         * Current hardware shows the SMO angle nearly 180 electrical degrees away
+         * from the forced-drag angle. Apply a fixed compensation first, then refine later.
+         */
+        .theta_offset_rad = MC_PI_F
     },
 
     .forced_drag =
     {
-        .align_current_a = 0.4f,
-        .align_time_s = 0.18f,
-        .drag_current_a = 0.8f,
-        .start_electrical_hz = 2.0f,
-        .target_electrical_hz = 45.0f,
-        .acceleration_hz_per_s = 220.0f,
-        .observer_blend_time_s = 0.05f,
-        .handover_electrical_hz = 20.0f
+        /*
+         * Forced-drag startup should be conservative for first hardware bring-up:
+         * 1. Use small align current only to establish rotor direction.
+         * 2. Ramp Iq instead of stepping to the target value directly.
+         * 3. Ramp electrical frequency by startup time first, not by an aggressive fixed slope.
+         */
+        .align_current_a = 0.5f,
+        .align_time_s = 0.25f,
+        .drag_current_a = 1.8f,
+        .drag_current_ramp_time_s = 0.50f,
+        .start_electrical_hz = 1.0f,
+        .target_electrical_hz = 32.0f,
+        .acceleration_time_s = 0.80f,
+        /* Backup slope if acceleration_time_s is set to 0. */
+        .acceleration_hz_per_s = 50.0f,
+        .observer_blend_time_s = 0.08f,
+        .handover_electrical_hz = 8.0f,
+        /* Do not hand over if startup angle and observer angle still differ too much. */
+        .handover_max_angle_error_rad = 0.52f
     },
 
     .protection =

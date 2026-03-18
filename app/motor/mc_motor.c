@@ -1,6 +1,8 @@
 #include "mc_motor.h"
 #include "mc_math.h"
 
+#define MC_MOTOR_RUN_BUTTON_DEBOUNCE_MS (50U)
+
 static void MC_Motor_ResetControllers(mc_motor_t *motor)
 {
     MC_PI_Reset(&motor->id_pi);
@@ -151,6 +153,8 @@ void MC_Motor_Init(mc_motor_t *motor, const mc_hal_ops_t *hal, const mc_user_con
     motor->calibration_count = 0U;
     motor->outputs_enabled = false;
     motor->handover_active = false;
+    motor->run_button_prev_pressed = false;
+    motor->run_command_latched = false;
     motor->handover_blend = 0.0f;
     motor->speed_command_rad_s = 0.0f;
     motor->speed_feedback_rpm = 0.0f;
@@ -158,6 +162,7 @@ void MC_Motor_Init(mc_motor_t *motor, const mc_hal_ops_t *hal, const mc_user_con
     motor->id_reference_a = 0.0f;
     motor->electrical_angle_rad = 0.0f;
     motor->electrical_speed_rad_s = 0.0f;
+    motor->last_run_button_toggle_ms = 0U;
     motor->last_slow_loop_tick_ms = 0U;
     motor->last_slow_loop_ts_s = config->derived.speed_loop_dt_s;
     motor->input_request.run_request = false;
@@ -252,7 +257,7 @@ void MC_Motor_FastLoop(mc_motor_t *motor, const mc_adc_sample_t *sample)
             motor->handover_blend += dt_s / motor->config.user.forced_drag.observer_blend_time_s;
             motor->handover_blend = MC_Math_Clamp(motor->handover_blend, 0.0f, 1.0f);
             electrical_angle = MC_Math_WrapAngle(electrical_angle + (motor->handover_blend * handover_error));
-            if (motor->handover_blend >= 0.5f)
+            if (motor->handover_blend >= 1.0f)
             {
                 MC_Motor_EnterState(motor, MC_STATE_RUN);
                 electrical_angle = motor->observer.output.theta_rad;
@@ -288,6 +293,7 @@ void MC_Motor_FastLoop(mc_motor_t *motor, const mc_adc_sample_t *sample)
 
 void MC_Motor_Background(mc_motor_t *motor)
 {
+    mc_input_request_t raw_input;
     uint32_t now_ms;
     float dt_s;
     float target_speed_rpm;
@@ -302,7 +308,18 @@ void MC_Motor_Background(mc_motor_t *motor)
     motor->last_slow_loop_tick_ms = now_ms;
     motor->last_slow_loop_ts_s = dt_s;
 
-    motor->hal->poll_inputs(&motor->input_request);
+    motor->hal->poll_inputs(&raw_input);
+    if (raw_input.run_request &&
+        !motor->run_button_prev_pressed &&
+        ((now_ms - motor->last_run_button_toggle_ms) >= MC_MOTOR_RUN_BUTTON_DEBOUNCE_MS))
+    {
+        motor->run_command_latched = !motor->run_command_latched;
+        motor->last_run_button_toggle_ms = now_ms;
+    }
+
+    motor->run_button_prev_pressed = raw_input.run_request;
+    motor->input_request = raw_input;
+    motor->input_request.run_request = motor->run_command_latched;
     target_speed_rpm = motor->input_request.run_request ?
         ((float)motor->input_request.direction * motor->config.user.command.default_speed_rpm) :
         0.0f;

@@ -1,51 +1,58 @@
 
 
-
-Breakpoint=/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_motor.c:311, State=BP_STATE_ON
-Breakpoint=/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/ytm32/mc_hal_ytm32.c:162, State=BP_STATE_DISABLED
-Breakpoint=/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/ytm32/mc_hal_ytm32.c:234, State=BP_STATE_DISABLED
-Breakpoint=/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/ytm32/mc_hal_ytm32.c:345, State=BP_STATE_DISABLED
+Breakpoint=/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_motor.c:314:5, State=BP_STATE_DISABLED
+Breakpoint=/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/platform/drivers/src/etmr/etmr_hw_access.h:1321:5, State=BP_STATE_DISABLED
+Breakpoint=/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/ytm32/mc_hal_ytm32.c:106:5, State=BP_STATE_DISABLED
+Breakpoint=/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/ytm32/mc_hal_ytm32.c:351:1, State=BP_STATE_DISABLED
 GraphedExpression="((s_motor).phase_currents_abc).a", Color=#e56a6f
 GraphedExpression="((s_motor).phase_currents_abc).b", Color=#35792b
-GraphedExpression="(s_motor).vbus_v", Color=#769dda, Show=0
-GraphedExpression="((svm_result).duty).duty_a", Color=#b14f0d, Show=0
-GraphedExpression="((svm_result).duty).duty_b", Color=#b3c38e, Show=0
-GraphedExpression="((svm_result).duty).duty_c", Color=#ab7b05, Show=0
-OpenDocument="main.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/main.c", Line=23
-OpenDocument="mc_observer.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_observer.c", Line=30
-OpenDocument="mc_protection.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_protection.c", Line=0
-OpenDocument="mc_hal_ytm32.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/ytm32/mc_hal_ytm32.c", Line=305
+GraphedExpression="(s_motor).iq_reference_a", Color=#769dda
+GraphedExpression="(((s_motor).observer).output).theta_rad", Color=#b14f0d
+GraphedExpression="((s_motor).startup).angle_rad", Color=#b3c38e
+GraphedExpression="(s_motor).handover_blend", Color=#ab7b05, Show=0
+OpenDocument="main.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/main.c", Line=45
 OpenDocument="motor_app.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/motor_app.c", Line=0
-OpenDocument="osif_baremetal.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/rtos/osif/osif_baremetal.c", Line=38
-OpenDocument="startup.S", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/board/startup.S", Line=7
+OpenDocument="mc_observer.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_observer.c", Line=30
+OpenDocument="mc_protection.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_protection.c", Line=34
+OpenDocument="mc_hal_ytm32.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/ytm32/mc_hal_ytm32.c", Line=313
+OpenDocument="mc_math.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_math.c", Line=1
+OpenDocument="osif_baremetal.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/rtos/osif/osif_baremetal.c", Line=48
+OpenDocument="startup.S", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/board/startup.S", Line=14
 OpenDocument="etmr_hw_access.h", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/platform/drivers/src/etmr/etmr_hw_access.h", Line=495
-OpenDocument="mc_motor.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_motor.c", Line=55
-OpenDocument="mc_math.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_math.c", Line=63
+OpenDocument="mc_motor.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/app/motor/mc_motor.c", Line=190
+OpenDocument="adc_driver.c", FilePath="/Users/major/work/1_Yuntu/M_Motor/5_YuntuMotorDemo/platform/drivers/src/adc/adc_driver.c", Line=654
 OpenToolbar="Debug", Floating=0, x=0, y=0
-OpenWindow="Call Stack", DockArea=RIGHT, x=0, y=1, w=702, h=102, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
-OpenWindow="Registers 1", DockArea=RIGHT, x=0, y=2, w=702, h=254, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, FilteredItems=[], RefreshRate=5
-OpenWindow="Disassembly", DockArea=RIGHT, x=0, y=0, w=702, h=137, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
-OpenWindow="Break & Tracepoints", DockArea=LEFT, x=0, y=0, w=395, h=264, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, VectorCatchIndexMask=254
-OpenWindow="Watched Data 1", DockArea=LEFT, x=0, y=1, w=395, h=230, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
-OpenWindow="Terminal", DockArea=BOTTOM, x=1, y=0, w=1130, h=352, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
-OpenWindow="Console", DockArea=BOTTOM, x=0, y=0, w=118, h=352, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Call Stack", DockArea=RIGHT, x=0, y=3, w=376, h=116, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Registers 1", DockArea=RIGHT, x=0, y=4, w=376, h=178, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, FilteredItems=[], RefreshRate=5
+OpenWindow="Disassembly", DockArea=RIGHT, x=0, y=1, w=376, h=116, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Break & Tracepoints", DockArea=LEFT, x=0, y=0, w=416, h=425, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, VectorCatchIndexMask=254
+OpenWindow="Memory 1", DockArea=BOTTOM, x=0, y=0, w=602, h=267, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=1, EditorAddress=0x401EC074
+OpenWindow="Global Data", DockArea=RIGHT, x=0, y=2, w=376, h=117, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Watched Data 1", DockArea=LEFT, x=0, y=1, w=416, h=443, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
+OpenWindow="Data Sampling", DockArea=BOTTOM, x=1, y=0, w=253, h=267, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, VisibleTab=0, UniformSampleSpacing=0
+OpenWindow="Timeline", DockArea=BOTTOM, x=2, y=0, w=1091, h=267, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=1, DataPaneShown=1, PowerPaneShown=0, CodePaneShown=0, PinCursor="Cursor Movable", TimePerDiv="2 s / Div", TimeStampFormat="Time", DataGraphDrawAsPoints=0, DataGraphLegendShown=1, DataGraphUniformSampleSpacing=0, DataGraphLegendPosition="732;0", DataGraphShowNamesAtCursor=0, PowerGraphDrawAsPoints=0, PowerGraphLegendShown=0, PowerGraphAvgFilterTime=Off, PowerGraphAvgFilterLen=Off, PowerGraphUniformSampleSpacing=0, PowerGraphLegendPosition="632;0", CodeGraphLegendShown=0, CodeGraphLegendPosition="652;0"
+OpenWindow="RTOS", DockArea=RIGHT, x=0, y=0, w=376, h=338, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, Showing=""
 SmartViewPlugin="", Page="", Toolbar="Hidden", Window="SmartView 1"
 SnapshotRegister="CPU.Core (Now)"
 SnapshotRegister="CPU.Core (All)"
 SnapshotRegister="CPU.FPU"
 SnapshotRegister="CPU.FPU (Double)"
 SnapshotRegister="CPU.Core"
+TableHeader="Global Data", SortCol="Value", SortOrder="ASCENDING", VisibleCols=["Name";"Value";"Location";"Size";"Type";"Scope"], ColWidths=[235;224;100;100;170;314]
 TableHeader="Vector Catches", SortCol="", SortOrder="ASCENDING", VisibleCols=["";"Vector Catch";"Description"], ColWidths=[50;300;500]
-TableHeader="Break & Tracepoints", SortCol="", SortOrder="DESCENDING", VisibleCols=["";"Type";"Location";"Extras"], ColWidths=[100;100;170;206]
+TableHeader="Break & Tracepoints", SortCol="", SortOrder="DESCENDING", VisibleCols=["";"Type";"Location";"Extras"], ColWidths=[100;100;170;350]
 TableHeader="Call Stack", SortCol="Function", SortOrder="ASCENDING", VisibleCols=["Function";"Stack Frame";"Source";"PC";"Return Address";"Stack Used"], ColWidths=[288;112;237;100;168;100]
 TableHeader="Power Sampling", SortCol="None", SortOrder="ASCENDING", VisibleCols=["Index";"Time";"Ch 0"], ColWidths=[100;100;100]
 TableHeader="Registers 1", SortCol="Name", SortOrder="ASCENDING", VisibleCols=["Name";"Value";"Description"], ColWidths=[241;314;224]
 TableHeader="Watched Data 1", SortCol="Expression", SortOrder="ASCENDING", VisibleCols=["Expression";"Value";"Location";"Refresh"], ColWidths=[230;149;100;100]
 TableHeader="RegisterSelectionDialog", SortCol="None", SortOrder="ASCENDING", VisibleCols=[], ColWidths=[]
 TableHeader="TargetExceptionDialog", SortCol="Name", SortOrder="ASCENDING", VisibleCols=["Name";"Value";"Address";"Description"], ColWidths=[200;370;100;499]
+TableHeader="Data Sampling Table", SortCol="None", SortOrder="ASCENDING", VisibleCols=["Index";"Time";" ((s_motor).phase_currents_abc).a";" ((s_motor).phase_currents_abc).b";" (s_motor).iq_reference_a";" (((s_motor).observer).output).theta_rad";" ((s_motor).startup).angle_rad";" (s_motor).handover_blend"], ColWidths=[100;100;100;100;100;100;100;100]
+TableHeader="Data Sampling Setup", SortCol="Expression", SortOrder="ASCENDING", VisibleCols=["Expression";"Type";"Value";"Min";"Max";"Average";"# Changes";"Min. Change";"Max. Change"], ColWidths=[206;100;100;100;100;105;100;100;105]
 WatchedExpression="g_mc_hal_ytm32_ops", Window=Watched Data 1
 WatchedExpression="pwm_clk_hz", Window=Watched Data 1
 WatchedExpression="motor", Window=Watched Data 1
 WatchedExpression="MotorApp_Init()", Window=Watched Data 1
 WatchedExpression="s_motor", Window=Watched Data 1
 WatchedExpression="svm_result", Window=Watched Data 1
+WatchedExpression="startup_output", Window=Watched Data 1

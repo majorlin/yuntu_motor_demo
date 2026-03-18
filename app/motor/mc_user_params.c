@@ -141,15 +141,15 @@ static const mc_config_params_t s_user_params =
         .align_time_s = 0.25f,
         .drag_current_a = 1.8f,
         .drag_current_ramp_time_s = 0.50f,
-        .start_electrical_hz = 1.0f,
-        .target_electrical_hz = 32.0f,
+        .start_electrical_hz = 3.0f,
+        .target_electrical_hz = 80.0f,
         .acceleration_time_s = 0.80f,
         /* Backup slope if acceleration_time_s is set to 0. */
-        .acceleration_hz_per_s = 50.0f,
+        .acceleration_hz_per_s = 100.0f,
         .observer_blend_time_s = 0.08f,
         .handover_electrical_hz = 8.0f,
         /* Do not hand over if startup angle and observer angle still differ too much. */
-        .handover_max_angle_error_rad = 0.52f
+        .handover_max_angle_error_rad = 0.82f
     },
 
     .protection =

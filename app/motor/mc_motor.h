@@ -22,6 +22,8 @@ typedef struct
     uint16_t calibration_count;
     bool outputs_enabled;
     bool handover_active;
+    bool run_button_prev_pressed;
+    bool run_command_latched;
     float handover_blend;
     float speed_command_rad_s;
     float speed_feedback_rpm;
@@ -30,6 +32,7 @@ typedef struct
     float electrical_angle_rad;
     float electrical_speed_rad_s;
     float last_slow_loop_ts_s;
+    uint32_t last_run_button_toggle_ms;
     uint32_t last_slow_loop_tick_ms;
     mc_input_request_t input_request;
     mc_adc_sample_t last_sample;

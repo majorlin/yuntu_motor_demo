@@ -28,6 +28,9 @@
 /* Default mechanical speed target exposed to the application interface. */
 #define MOTOR_CFG_DEFAULT_TARGET_RPM             (500.0f)
 
+/* Upper clamp for runtime speed commands coming from keys or debugger. */
+#define MOTOR_CFG_MAX_TARGET_RPM                 (8500.0f)
+
 /* Default direction used at startup. Valid values are +1 or -1. */
 #define MOTOR_CFG_DEFAULT_DIRECTION              (1)
 
@@ -190,6 +193,9 @@
 #define MOTOR_CFG_SPEED_KP                       (0.010f)
 #define MOTOR_CFG_SPEED_KI                       (0.200f)
 
+/* Runtime speed-command ramp to avoid large torque steps when changing rpm. */
+#define MOTOR_CFG_SPEED_RAMP_RPM_PER_S           (600.0f)
+
 /* --------------------------- Startup / transition ------------------------- */
 
 /* Fixed electrical angle used during rotor alignment. */
@@ -199,7 +205,7 @@
 #define MOTOR_CFG_ALIGN_CURRENT_A                (0.3f)
 
 /* Alignment duration in milliseconds. */
-#define MOTOR_CFG_ALIGN_TIME_MS                  (100U)
+#define MOTOR_CFG_ALIGN_TIME_MS                  (10U)
 
 /* Open-loop q-axis current during the startup ramp. */
 #define MOTOR_CFG_OPEN_LOOP_IQ_A                 (1.0f)

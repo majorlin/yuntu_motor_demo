@@ -219,7 +219,7 @@
 /* ------------------------- Observer / PLL parameters ---------------------- */
 
 /* Ortega observer correction gain. Larger values converge faster but add noise. */
-#define MOTOR_CFG_OBSERVER_GAIN                  (2000.0f)
+#define MOTOR_CFG_OBSERVER_GAIN                  (2.0e6f)
 
 /* Flux magnitude compensation bandwidth in rad/s. */
 #define MOTOR_CFG_LAMBDA_COMP_BW_RAD_S           (80.0f)
@@ -235,6 +235,9 @@
 
 /* PLL integral gain. */
 #define MOTOR_CFG_PLL_KI                         (20000.0f)
+
+/* 开环切环阶段对固定相位偏置的跟踪带宽。 */
+#define MOTOR_CFG_OBSERVER_PHASE_TRACK_BW_RAD_S  (40.0f)
 
 /* ------------------------------- Derived data ----------------------------- */
 

@@ -71,7 +71,7 @@ static void MotorHwYtm32_SetAdcTriggerPoint(eTMR_Type *const etmrBase)
 static void MotorHwYtm32_WriteHighSidePwm(eTMR_Type *const etmrBase, uint8_t channel, float duty)
 {
     const uint32_t halfPeriodTicks = MOTOR_CFG_PWM_HALF_PERIOD_TICKS;
-    const float clampedDuty = (duty < 0.0f) ? 0.0f : ((duty > 1.0f) ? 1.0f : duty);
+    const float clampedDuty = (duty < 0.0f) ? 0.0f : ((duty > 1.0f) ? 1.0f : (1.0 - duty));
     const uint32_t edgeDelta = (uint32_t)(clampedDuty * (float)halfPeriodTicks);
 
     eTMR_SetChnVal0(etmrBase, channel, MOTOR_CFG_PWM_MID_TICKS - edgeDelta);

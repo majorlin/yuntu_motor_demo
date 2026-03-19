@@ -30,9 +30,12 @@ typedef struct
     float closedLoopBlend;
     float latestPhaseErrorRad;
     float latestObserverAngleRad;
+    float observerPhaseOffsetRad;
+    float observerLockResidualRad;
 } motor_control_ctx_t;
 
 static motor_control_ctx_t s_motorCtrl;
+volatile motor_debug_t g_motorDebug;
 
 static float MotorControl_Clamp(float value, float minValue, float maxValue)
 {
@@ -48,6 +51,18 @@ static float MotorControl_Clamp(float value, float minValue, float maxValue)
     }
 
     return result;
+}
+
+static float MotorControl_WrapAngleSigned(float angleRad)
+{
+    float wrappedAngle = MotorFoc_WrapAngle0ToTwoPi(angleRad);
+
+    if (wrappedAngle > MOTOR_CFG_PI_F)
+    {
+        wrappedAngle -= MOTOR_CFG_TWO_PI_F;
+    }
+
+    return wrappedAngle;
 }
 
 static void MotorControl_SetState(motor_control_state_t nextState)
@@ -90,6 +105,46 @@ static float MotorControl_BlendAngle(float fromAngleRad, float toAngleRad, float
                                       (blend * MotorFoc_AngleDiff(toAngleRad, fromAngleRad)));
 }
 
+static float MotorControl_BlendPhase(float fromPhaseRad, float toPhaseRad, float blend)
+{
+    return MotorControl_WrapAngleSigned(fromPhaseRad +
+                                        (blend * MotorFoc_AngleDiff(toPhaseRad, fromPhaseRad)));
+}
+
+static void MotorControl_UpdateDebugState(float controlAngleRad)
+{
+    g_motorDebug.control_state = (uint32_t)s_motorCtrl.status.state;
+    g_motorDebug.fault_code = (uint32_t)s_motorCtrl.status.fault;
+    g_motorDebug.observer_locked = s_motorCtrl.status.observer_locked;
+    g_motorDebug.outputs_unmasked = s_motorCtrl.outputsUnmasked;
+    g_motorDebug.fast_loop_running = s_motorCtrl.fastLoopRunning;
+    g_motorDebug.startup_time_ms = s_motorCtrl.startupTimeMs;
+    g_motorDebug.state_time_ms = s_motorCtrl.stateTimeMs;
+    g_motorDebug.observer_lock_count = s_motorCtrl.observerLockCount;
+    g_motorDebug.observer_loss_count = s_motorCtrl.observerLossCount;
+    g_motorDebug.closed_loop_blend = s_motorCtrl.closedLoopBlend;
+    g_motorDebug.open_loop_angle_rad = s_motorCtrl.openLoopAngleRad;
+    g_motorDebug.open_loop_speed_rad_s = s_motorCtrl.openLoopSpeedRadS;
+    g_motorDebug.control_angle_rad = controlAngleRad;
+    g_motorDebug.observer_angle_rad = s_motorCtrl.latestObserverAngleRad;
+    g_motorDebug.observer_speed_rad_s = s_motorCtrl.status.electrical_speed_rad_s;
+    g_motorDebug.observer_phase_offset_rad = s_motorCtrl.observerPhaseOffsetRad;
+    g_motorDebug.observer_lock_residual_rad = s_motorCtrl.observerLockResidualRad;
+    g_motorDebug.phase_error_rad = s_motorCtrl.latestPhaseErrorRad;
+    g_motorDebug.electrical_angle_rad = s_motorCtrl.status.electrical_angle_rad;
+    g_motorDebug.electrical_speed_rad_s = s_motorCtrl.status.electrical_speed_rad_s;
+    g_motorDebug.target_electrical_speed_rad_s = MotorControl_GetTargetElectricalSpeedRadS();
+    g_motorDebug.mechanical_rpm = s_motorCtrl.status.mechanical_rpm;
+    g_motorDebug.bus_voltage_v = s_motorCtrl.status.bus_voltage_v;
+    g_motorDebug.phase_current_a = s_motorCtrl.status.phase_current_a;
+    g_motorDebug.phase_current_b = s_motorCtrl.status.phase_current_b;
+    g_motorDebug.phase_current_c = s_motorCtrl.status.phase_current_c;
+    g_motorDebug.id_a = s_motorCtrl.status.id_a;
+    g_motorDebug.iq_a = s_motorCtrl.status.iq_a;
+    g_motorDebug.id_target_a = s_motorCtrl.status.id_target_a;
+    g_motorDebug.iq_target_a = s_motorCtrl.status.iq_target_a;
+}
+
 static void MotorControl_ResetRuntime(void)
 {
     s_motorCtrl.fastLoopRunning = false;
@@ -101,9 +156,13 @@ static void MotorControl_ResetRuntime(void)
     s_motorCtrl.closedLoopBlend = 0.0f;
     s_motorCtrl.latestPhaseErrorRad = 0.0f;
     s_motorCtrl.latestObserverAngleRad = 0.0f;
+    s_motorCtrl.observerPhaseOffsetRad = 0.0f;
+    s_motorCtrl.observerLockResidualRad = 0.0f;
     s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
     s_motorCtrl.openLoopSpeedRadS = 0.0f;
     MotorFoc_Reset(&s_motorCtrl.foc);
+    (void)memset((void *)&g_motorDebug, 0, sizeof(g_motorDebug));
+    MotorControl_UpdateDebugState(s_motorCtrl.openLoopAngleRad);
 }
 
 static void MotorControl_EnterStop(void)
@@ -174,6 +233,8 @@ static void MotorControl_StartOpenLoop(void)
     s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
     s_motorCtrl.openLoopSpeedRadS = MotorControl_GetSignedDirection() *
                                     MOTOR_CFG_OPEN_LOOP_START_RAD_S;
+    s_motorCtrl.observerPhaseOffsetRad = s_motorCtrl.latestPhaseErrorRad;
+    s_motorCtrl.observerLockResidualRad = 0.0f;
     s_motorCtrl.status.id_target_a = 0.0f;
     s_motorCtrl.status.iq_target_a = MotorControl_GetSignedDirection() *
                                      MOTOR_CFG_OPEN_LOOP_IQ_A;
@@ -192,6 +253,10 @@ static void MotorControl_StartClosedLoop(void)
 static void MotorControl_UpdateOpenLoopState(void)
 {
     const float speedStepRadS = MOTOR_CFG_OPEN_LOOP_ACCEL_RAD_S2 * MOTOR_CFG_SPEED_LOOP_DT_S;
+    const float phaseTrackBlend = MotorControl_Clamp(MOTOR_CFG_OBSERVER_PHASE_TRACK_BW_RAD_S *
+                                                     MOTOR_CFG_SPEED_LOOP_DT_S,
+                                                     0.0f,
+                                                     1.0f);
     float openLoopSpeedMagRadS;
 
     s_motorCtrl.stateTimeMs++;
@@ -201,11 +266,16 @@ static void MotorControl_UpdateOpenLoopState(void)
                                               0.0f,
                                               MOTOR_CFG_OPEN_LOOP_HANDOVER_RAD_S);
     s_motorCtrl.openLoopSpeedRadS = MotorControl_GetSignedDirection() * openLoopSpeedMagRadS;
+    s_motorCtrl.observerPhaseOffsetRad = MotorControl_BlendPhase(s_motorCtrl.observerPhaseOffsetRad,
+                                                                 s_motorCtrl.latestPhaseErrorRad,
+                                                                 phaseTrackBlend);
+    s_motorCtrl.observerLockResidualRad = MotorControl_WrapAngleSigned(
+        MotorFoc_AngleDiff(s_motorCtrl.latestPhaseErrorRad, s_motorCtrl.observerPhaseOffsetRad));
     s_motorCtrl.status.id_target_a = 0.0f;
     s_motorCtrl.status.iq_target_a = MotorControl_GetSignedDirection() * MOTOR_CFG_OPEN_LOOP_IQ_A;
 
     if ((__builtin_fabsf(s_motorCtrl.status.electrical_speed_rad_s) >= MOTOR_CFG_MIN_LOCK_ELEC_SPEED_RAD_S) &&
-        (__builtin_fabsf(s_motorCtrl.latestPhaseErrorRad) <= MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD))
+        (__builtin_fabsf(s_motorCtrl.observerLockResidualRad) <= MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD))
     {
         s_motorCtrl.observerLockCount++;
     }
@@ -306,11 +376,14 @@ static void MotorControl_HandleSlowLoop(void)
         default:
             break;
     }
+
+    MotorControl_UpdateDebugState(s_motorCtrl.status.electrical_angle_rad);
 }
 
 void MotorControl_Init(void)
 {
     (void)memset(&s_motorCtrl, 0, sizeof(s_motorCtrl));
+    (void)memset((void *)&g_motorDebug, 0, sizeof(g_motorDebug));
 
     s_motorCtrl.status.state = MOTOR_STATE_STOP;
     s_motorCtrl.status.fault = MOTOR_FAULT_NONE;
@@ -324,6 +397,7 @@ void MotorControl_Init(void)
     MotorHwYtm32_Init();
     MotorHwYtm32_SetOutputsMasked(true);
     MotorHwYtm32_StartSpeedLoopTimer();
+    MotorControl_UpdateDebugState(s_motorCtrl.status.electrical_angle_rad);
 }
 
 void MotorControl_Enable(bool enable)
@@ -369,6 +443,11 @@ bool MotorControl_SetDirection(int8_t direction)
 const motor_status_t *MotorControl_GetStatus(void)
 {
     return &s_motorCtrl.status;
+}
+
+const volatile motor_debug_t *MotorControl_GetDebug(void)
+{
+    return &g_motorDebug;
 }
 
 void ADC0_IRQHandler(void)
@@ -474,9 +553,9 @@ void ADC0_IRQHandler(void)
         }
     }
 
-    focInput.phase_current_a = 0 - phaseCurrentA;
-    focInput.phase_current_b = 0 - phaseCurrentB;
-    focInput.phase_current_c = 0 - phaseCurrentC;
+    focInput.phase_current_a = phaseCurrentA;
+    focInput.phase_current_b = phaseCurrentB;
+    focInput.phase_current_c = phaseCurrentC;
     focInput.bus_voltage_v = busVoltageV;
     focInput.control_angle_rad = controlAngleRad;
     focInput.id_target_a = s_motorCtrl.status.id_target_a;
@@ -493,6 +572,7 @@ void ADC0_IRQHandler(void)
     s_motorCtrl.status.electrical_angle_rad =
         (s_motorCtrl.status.state == MOTOR_STATE_CLOSED_LOOP) ?
         focOutput.observer_angle_rad : controlAngleRad;
+    MotorControl_UpdateDebugState(controlAngleRad);
 
     if (!s_motorCtrl.outputsUnmasked)
     {

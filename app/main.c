@@ -58,6 +58,7 @@ int main(void)
     /* USER CODE BEGIN 2 */
     INT_SYS_ConfigInit();
     MotorControl_Init();
+    MotorControl_Enable(true);
     /* USER CODE END 2 */
 
     /* Infinite loop */

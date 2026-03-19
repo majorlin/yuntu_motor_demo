@@ -140,6 +140,7 @@ static void MotorControl_BeginOffsetCalibration(void)
 {
     MotorHwYtm32_DisableFastLoopSampling();
     MotorHwYtm32_SetOutputsMasked(true);
+    MotorHwYtm32_ApplyPhaseDuty(0.5f, 0.5f, 0.5f);
     MotorControl_ResetRuntime();
     s_motorCtrl.currentOffsetASum = 0.0f;
     s_motorCtrl.currentOffsetBSum = 0.0f;
@@ -147,6 +148,9 @@ static void MotorControl_BeginOffsetCalibration(void)
     s_motorCtrl.offsetSampleCount = 0U;
     s_motorCtrl.status.fault = MOTOR_FAULT_NONE;
     s_motorCtrl.status.observer_locked = false;
+    s_motorCtrl.fastLoopRunning = true;
+    MotorHwYtm32_EnableFastLoopSampling();
+    MotorHwYtm32_SetOutputsMasked(true);
     MotorControl_SetState(MOTOR_STATE_OFFSET_CAL);
 }
 
@@ -161,7 +165,6 @@ static void MotorControl_StartAlign(void)
     s_motorCtrl.status.id_target_a = MOTOR_CFG_ALIGN_CURRENT_A;
     s_motorCtrl.status.iq_target_a = 0.0f;
     s_motorCtrl.status.observer_locked = false;
-    MotorHwYtm32_EnableFastLoopSampling();
     s_motorCtrl.fastLoopRunning = true;
     MotorControl_SetState(MOTOR_STATE_ALIGN);
 }
@@ -258,8 +261,6 @@ static void MotorControl_UpdateClosedLoopState(void)
 
 static void MotorControl_HandleSlowLoop(void)
 {
-    motor_adc_raw_frame_t rawFrame;
-
     s_motorCtrl.status.enabled = s_motorCtrl.enableRequest;
     s_motorCtrl.status.mechanical_rpm = MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(s_motorCtrl.status.electrical_speed_rad_s);
 
@@ -279,25 +280,6 @@ static void MotorControl_HandleSlowLoop(void)
             break;
 
         case MOTOR_STATE_OFFSET_CAL:
-            if (!MotorHwYtm32_ReadSoftwareFrame(&rawFrame))
-            {
-                break;
-            }
-
-            s_motorCtrl.currentOffsetASum += (float)rawFrame.current_a_raw;
-            s_motorCtrl.currentOffsetBSum += (float)rawFrame.current_b_raw;
-            s_motorCtrl.currentOffsetCSum += (float)rawFrame.current_c_raw;
-            s_motorCtrl.offsetSampleCount++;
-
-            if (s_motorCtrl.offsetSampleCount >= MOTOR_CFG_OFFSET_CAL_SAMPLES)
-            {
-                const float sampleCount = (float)s_motorCtrl.offsetSampleCount;
-
-                s_motorCtrl.currentOffsetARaw = s_motorCtrl.currentOffsetASum / sampleCount;
-                s_motorCtrl.currentOffsetBRaw = s_motorCtrl.currentOffsetBSum / sampleCount;
-                s_motorCtrl.currentOffsetCRaw = s_motorCtrl.currentOffsetCSum / sampleCount;
-                MotorControl_StartAlign();
-            }
             break;
 
         case MOTOR_STATE_ALIGN:
@@ -426,8 +408,26 @@ void ADC0_IRQHandler(void)
     s_motorCtrl.status.phase_current_c = phaseCurrentC;
     s_motorCtrl.status.bus_voltage_v = busVoltageV;
 
+    if (s_motorCtrl.status.state == MOTOR_STATE_OFFSET_CAL)
+    {
+        s_motorCtrl.currentOffsetASum += (float)rawFrame.current_a_raw;
+        s_motorCtrl.currentOffsetBSum += (float)rawFrame.current_b_raw;
+        s_motorCtrl.currentOffsetCSum += (float)rawFrame.current_c_raw;
+        s_motorCtrl.offsetSampleCount++;
+
+        if (s_motorCtrl.offsetSampleCount >= MOTOR_CFG_OFFSET_CAL_SAMPLES)
+        {
+            const float sampleCount = (float)s_motorCtrl.offsetSampleCount;
+
+            s_motorCtrl.currentOffsetARaw = s_motorCtrl.currentOffsetASum / sampleCount;
+            s_motorCtrl.currentOffsetBRaw = s_motorCtrl.currentOffsetBSum / sampleCount;
+            s_motorCtrl.currentOffsetCRaw = s_motorCtrl.currentOffsetCSum / sampleCount;
+            MotorControl_StartAlign();
+        }
+        return;
+    }
+
     if ((s_motorCtrl.status.state == MOTOR_STATE_STOP) ||
-        (s_motorCtrl.status.state == MOTOR_STATE_OFFSET_CAL) ||
         (s_motorCtrl.status.state == MOTOR_STATE_FAULT))
     {
         return;
@@ -474,9 +474,9 @@ void ADC0_IRQHandler(void)
         }
     }
 
-    focInput.phase_current_a = phaseCurrentA;
-    focInput.phase_current_b = phaseCurrentB;
-    focInput.phase_current_c = phaseCurrentC;
+    focInput.phase_current_a = 0 - phaseCurrentA;
+    focInput.phase_current_b = 0 - phaseCurrentB;
+    focInput.phase_current_c = 0 - phaseCurrentC;
     focInput.bus_voltage_v = busVoltageV;
     focInput.control_angle_rad = controlAngleRad;
     focInput.id_target_a = s_motorCtrl.status.id_target_a;

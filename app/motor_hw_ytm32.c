@@ -46,14 +46,46 @@
 static etmr_state_t s_motorEtmrState;
 static etmr_pwm_sync_t s_motorEtmrSync;
 static etmr_trig_config_t s_motorEtmrTrig;
+static etmr_trig_ch_param_t s_motorEtmrTrigChannel[1];
+static bool s_adcConfiguredForHardwareTrigger = true;
+
+static void MotorHwYtm32_SelectAdc0ExternalTriggerFromTmu(void)
+{
+    CIM->CTRL = (CIM->CTRL & ~CIM_CTRL_ADC0_TRIG_SEL_MASK) | CIM_CTRL_ADC0_TRIG_SEL(1U);
+}
 
 static void MotorHwYtm32_ConfigClocks(void)
 {
-    CLOCK_DRV_SetModuleClock(ADC0_CLK, true, CLK_SRC_PLL, DIV_BY_8);
+    CLOCK_DRV_SetModuleClock(ADC0_CLK, true, CLK_SRC_FIRC, DIV_BY_3);
     CLOCK_DRV_SetModuleClock(TMU_CLK, true, CLK_SRC_DISABLED, DIV_BY_1);
     CLOCK_DRV_SetModuleClock(eTMR0_CLK, true, CLK_SRC_DISABLED, DIV_BY_1);
     CLOCK_DRV_SetModuleClock(pTMR0_CLK, true, CLK_SRC_DISABLED, DIV_BY_1);
 }
+
+static void MotorHwYtm32_SetAdcTriggerPoint(eTMR_Type *const etmrBase)
+{
+    eTMR_SetChnVal0(etmrBase, MOTOR_HW_PWM_U_LOW_CH, 0U);
+    eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_U_LOW_CH, 0U);
+}
+
+static void MotorHwYtm32_WriteHighSidePwm(eTMR_Type *const etmrBase, uint8_t channel, float duty)
+{
+    const uint32_t halfPeriodTicks = MOTOR_CFG_PWM_HALF_PERIOD_TICKS;
+    const float clampedDuty = (duty < 0.0f) ? 0.0f : ((duty > 1.0f) ? 1.0f : duty);
+    const uint32_t edgeDelta = (uint32_t)(clampedDuty * (float)halfPeriodTicks);
+
+    eTMR_SetChnVal0(etmrBase, channel, MOTOR_CFG_PWM_MID_TICKS - edgeDelta);
+    eTMR_SetChnVal1(etmrBase, channel, MOTOR_CFG_PWM_MID_TICKS + edgeDelta);
+}
+
+static void MotorHwYtm32_SetNeutralPwm(eTMR_Type *const etmrBase)
+{
+    MotorHwYtm32_WriteHighSidePwm(etmrBase, MOTOR_HW_PWM_U_HIGH_CH, 0.5f);
+    MotorHwYtm32_WriteHighSidePwm(etmrBase, MOTOR_HW_PWM_V_HIGH_CH, 0.5f);
+    MotorHwYtm32_WriteHighSidePwm(etmrBase, MOTOR_HW_PWM_W_HIGH_CH, 0.5f);
+    MotorHwYtm32_SetAdcTriggerPoint(etmrBase);
+}
+
 
 static void MotorHwYtm32_ConfigAdc(bool hardwareTrigger, bool sequenceInterrupt, bool overrunInterrupt)
 {
@@ -63,6 +95,8 @@ static void MotorHwYtm32_ConfigAdc(bool hardwareTrigger, bool sequenceInterrupt,
     ADC_DRV_InitConverterStruct(&adcConfig);
 
     adcConfig.trigger = hardwareTrigger ? ADC_TRIGGER_HARDWARE : ADC_TRIGGER_SOFTWARE;
+    adcConfig.clockDivider = 0U;
+    adcConfig.sampleTime = 4U;
     adcConfig.sequenceConfig.channels[0] = MOTOR_HW_ADC_CURRENT_A_CH;
     adcConfig.sequenceConfig.channels[1] = MOTOR_HW_ADC_CURRENT_B_CH;
     adcConfig.sequenceConfig.channels[2] = MOTOR_HW_ADC_CURRENT_C_CH;
@@ -81,6 +115,7 @@ static void MotorHwYtm32_ConfigAdc(bool hardwareTrigger, bool sequenceInterrupt,
     ADC_DRV_ClearOvrFlagCmd(MOTOR_HW_ADC_INSTANCE);
     ADC_DRV_ClearReadyFlagCmd(MOTOR_HW_ADC_INSTANCE);
     ADC_DRV_ClearSampEndFlagCmd(MOTOR_HW_ADC_INSTANCE);
+    s_adcConfiguredForHardwareTrigger = hardwareTrigger;
 }
 
 static void MotorHwYtm32_InitTmu(void)
@@ -142,10 +177,13 @@ static void MotorHwYtm32_InitEtmr(void)
     s_motorEtmrTrig.outputTrigWidth = 1U;
     s_motorEtmrTrig.outputTrigFreq = 1U;
     s_motorEtmrTrig.modMatchTrigEnable = false;
-    s_motorEtmrTrig.midMatchTrigEnable = true;
+    s_motorEtmrTrig.midMatchTrigEnable = false;
     s_motorEtmrTrig.initMatchTrigEnable = false;
-    s_motorEtmrTrig.numOfChannels = 0U;
-    s_motorEtmrTrig.channelTrigParamConfig = NULL;
+    s_motorEtmrTrig.numOfChannels = 1U;
+    s_motorEtmrTrig.channelTrigParamConfig = s_motorEtmrTrigChannel;
+    s_motorEtmrTrigChannel[0].channelId = MOTOR_HW_PWM_U_LOW_CH;
+    s_motorEtmrTrigChannel[0].channelVal0MatchTrigEn = true;
+    s_motorEtmrTrigChannel[0].channelVal1MatchTrigEn = false;
 
     etmrConfig.outputTrigConfig = &s_motorEtmrTrig;
     etmrConfig.etmrClockSource = eTMR_CLOCK_SOURCE_INTERNALCLK;
@@ -154,10 +192,10 @@ static void MotorHwYtm32_InitEtmr(void)
     etmrConfig.isTofIntEnabled = false;
 
     (void)eTMR_DRV_Init(MOTOR_HW_ETMR_INSTANCE, &etmrConfig, &s_motorEtmrState);
-    (void)eTMR_DRV_SetCounterInit(MOTOR_HW_ETMR_INSTANCE, 0U, true);
-    (void)eTMR_DRV_SetCounterMod(MOTOR_HW_ETMR_INSTANCE, MOTOR_CFG_PWM_PERIOD_TICKS, true);
-    (void)eTMR_DRV_SetCounterMid(MOTOR_HW_ETMR_INSTANCE, MOTOR_CFG_PWM_MID_TICKS);
-    (void)eTMR_DRV_SetSafeState(MOTOR_HW_ETMR_INSTANCE, 0U);
+    etmrBase->INIT = 0U;
+    etmrBase->MOD = MOTOR_CFG_PWM_PERIOD_TICKS;
+    etmrBase->MID = MOTOR_CFG_PWM_MID_TICKS;
+    etmrBase->CHFV = 0U;
 
     for (index = 0U; index < (sizeof(usedChannels) / sizeof(usedChannels[0])); index++)
     {
@@ -169,8 +207,9 @@ static void MotorHwYtm32_InitEtmr(void)
         eTMR_SetChnOutInitVal(etmrBase, channel, 0U);
         eTMR_InitChnOutput(etmrBase, channel);
         eTMR_SetChnDeadtime(etmrBase, channel, MOTOR_CFG_DEADTIME_TICKS);
-        eTMR_SetChnVal0(etmrBase, channel, MOTOR_CFG_PWM_MID_TICKS);
-        eTMR_SetChnVal1(etmrBase, channel, MOTOR_CFG_PWM_MID_TICKS);
+
+        eTMR_SetChnVal0(etmrBase, channel, 0U);
+        eTMR_SetChnVal1(etmrBase, channel, 0U);
     }
 
     eTMR_DRV_SetChnCompMode(MOTOR_HW_ETMR_INSTANCE, 0U, PWM_COMPLEMENTARY_MODE);
@@ -182,6 +221,7 @@ static void MotorHwYtm32_InitEtmr(void)
     eTMR_DRV_SetChnDoubleSwitch(MOTOR_HW_ETMR_INSTANCE, 3U, false);
 #endif
 
+    MotorHwYtm32_SetNeutralPwm(etmrBase);
     MotorHwYtm32_CommitShadowNow();
     (void)eTMR_DRV_SetChnOutMask(MOTOR_HW_ETMR_INSTANCE, MOTOR_CFG_USED_PWM_CHANNEL_MASK, 0U, true);
     eTMR_DRV_Disable(MOTOR_HW_ETMR_INSTANCE);
@@ -205,57 +245,22 @@ static void MotorHwYtm32_InitPtmr(void)
 
 static bool MotorHwYtm32_ReadFifoFrame(motor_adc_raw_frame_t *frame)
 {
-    uint8_t seenMask = 0U;
-    uint8_t index;
+    frame->current_a_raw = ADC_DRV_ReadFIFO(MOTOR_HW_ADC_INSTANCE);
+    frame->current_b_raw = ADC_DRV_ReadFIFO(MOTOR_HW_ADC_INSTANCE);
+    frame->current_c_raw = ADC_DRV_ReadFIFO(MOTOR_HW_ADC_INSTANCE);
+    frame->vbus_raw = ADC_DRV_ReadFIFO(MOTOR_HW_ADC_INSTANCE);
 
-    frame->current_a_raw = 0U;
-    frame->current_b_raw = 0U;
-    frame->current_c_raw = 0U;
-    frame->vbus_raw = 0U;
-
-    for (index = 0U; index < 4U; index++)
-    {
-        const uint32_t rawWord = ADC_DRV_ReadSeqtagAndData(MOTOR_HW_ADC_INSTANCE);
-        const uint32_t channelId = (rawWord & ADC_FIFO_CHID_MASK) >> ADC_FIFO_CHID_SHIFT;
-        const uint16_t channelData = (uint16_t)((rawWord & ADC_FIFO_DATA_MASK) >> ADC_FIFO_DATA_SHIFT);
-
-        switch (channelId)
-        {
-            case MOTOR_HW_ADC_CURRENT_A_CH:
-                frame->current_a_raw = channelData;
-                seenMask |= 0x01U;
-                break;
-
-            case MOTOR_HW_ADC_CURRENT_B_CH:
-                frame->current_b_raw = channelData;
-                seenMask |= 0x02U;
-                break;
-
-            case MOTOR_HW_ADC_CURRENT_C_CH:
-                frame->current_c_raw = channelData;
-                seenMask |= 0x04U;
-                break;
-
-            case MOTOR_HW_ADC_VBUS_CH:
-                frame->vbus_raw = channelData;
-                seenMask |= 0x08U;
-                break;
-
-            default:
-                break;
-        }
-    }
-
-    return (seenMask == 0x0FU);
+    return true;
 }
 
 void MotorHwYtm32_Init(void)
 {
     MotorHwYtm32_ConfigClocks();
+    MotorHwYtm32_SelectAdc0ExternalTriggerFromTmu();
     INT_SYS_DisableIRQ(ADC0_IRQn);
-    MotorHwYtm32_ConfigAdc(false, false, false);
-    MotorHwYtm32_InitTmu();
+    MotorHwYtm32_ConfigAdc(true, false, false);
     MotorHwYtm32_InitEtmr();
+    MotorHwYtm32_InitTmu();
     MotorHwYtm32_InitPtmr();
     INT_SYS_SetPriority(ADC0_IRQn, MOTOR_HW_ADC_IRQ_PRIORITY);
     INT_SYS_SetPriority(pTMR0_Ch0_IRQn, MOTOR_HW_SPEED_IRQ_PRIORITY);
@@ -279,6 +284,11 @@ bool MotorHwYtm32_ReadSoftwareFrame(motor_adc_raw_frame_t *frame)
     if (frame == NULL)
     {
         return false;
+    }
+
+    if (s_adcConfiguredForHardwareTrigger)
+    {
+        MotorHwYtm32_ConfigAdc(false, false, false);
     }
 
     frame->overrun = false;
@@ -330,7 +340,7 @@ void MotorHwYtm32_DisableFastLoopSampling(void)
     ADC_DRV_Stop(MOTOR_HW_ADC_INSTANCE);
     MotorHwYtm32_StopPwmTimeBase();
     MotorHwYtm32_SetOutputsMasked(true);
-    MotorHwYtm32_ConfigAdc(false, false, false);
+    MotorHwYtm32_ConfigAdc(true, false, false);
 }
 
 bool MotorHwYtm32_ReadTriggeredFrame(motor_adc_raw_frame_t *frame)
@@ -379,31 +389,13 @@ void MotorHwYtm32_SetOutputsMasked(bool masked)
 
 void MotorHwYtm32_ApplyPhaseDuty(float dutyU, float dutyV, float dutyW)
 {
-    const uint32_t halfPeriodTicks = MOTOR_CFG_PWM_HALF_PERIOD_TICKS;
-    const float clampedDutyU = (dutyU < 0.0f) ? 0.0f : ((dutyU > 1.0f) ? 1.0f : dutyU);
-    const float clampedDutyV = (dutyV < 0.0f) ? 0.0f : ((dutyV > 1.0f) ? 1.0f : dutyV);
-    const float clampedDutyW = (dutyW < 0.0f) ? 0.0f : ((dutyW > 1.0f) ? 1.0f : dutyW);
-    const uint32_t edgeDeltaU = (uint32_t)(clampedDutyU * (float)halfPeriodTicks);
-    const uint32_t edgeDeltaV = (uint32_t)(clampedDutyV * (float)halfPeriodTicks);
-    const uint32_t edgeDeltaW = (uint32_t)(clampedDutyW * (float)halfPeriodTicks);
     eTMR_Type *const etmrBase = g_etmrBase[MOTOR_HW_ETMR_INSTANCE];
 
     eTMR_ClearLdok(etmrBase);
-
-    eTMR_SetChnVal0(etmrBase, MOTOR_HW_PWM_U_HIGH_CH, MOTOR_CFG_PWM_MID_TICKS - edgeDeltaU);
-    eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_U_HIGH_CH, MOTOR_CFG_PWM_MID_TICKS + edgeDeltaU);
-    eTMR_SetChnVal0(etmrBase, MOTOR_HW_PWM_U_LOW_CH, MOTOR_CFG_PWM_MID_TICKS - edgeDeltaU);
-    eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_U_LOW_CH, MOTOR_CFG_PWM_MID_TICKS + edgeDeltaU);
-
-    eTMR_SetChnVal0(etmrBase, MOTOR_HW_PWM_V_HIGH_CH, MOTOR_CFG_PWM_MID_TICKS - edgeDeltaV);
-    eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_V_HIGH_CH, MOTOR_CFG_PWM_MID_TICKS + edgeDeltaV);
-    eTMR_SetChnVal0(etmrBase, MOTOR_HW_PWM_V_LOW_CH, MOTOR_CFG_PWM_MID_TICKS - edgeDeltaV);
-    eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_V_LOW_CH, MOTOR_CFG_PWM_MID_TICKS + edgeDeltaV);
-
-    eTMR_SetChnVal0(etmrBase, MOTOR_HW_PWM_W_HIGH_CH, MOTOR_CFG_PWM_MID_TICKS - edgeDeltaW);
-    eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_W_HIGH_CH, MOTOR_CFG_PWM_MID_TICKS + edgeDeltaW);
-    eTMR_SetChnVal0(etmrBase, MOTOR_HW_PWM_W_LOW_CH, MOTOR_CFG_PWM_MID_TICKS - edgeDeltaW);
-    eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_W_LOW_CH, MOTOR_CFG_PWM_MID_TICKS + edgeDeltaW);
+    MotorHwYtm32_WriteHighSidePwm(etmrBase, MOTOR_HW_PWM_U_HIGH_CH, dutyU);
+    MotorHwYtm32_WriteHighSidePwm(etmrBase, MOTOR_HW_PWM_V_HIGH_CH, dutyV);
+    MotorHwYtm32_WriteHighSidePwm(etmrBase, MOTOR_HW_PWM_W_HIGH_CH, dutyW);
+    MotorHwYtm32_SetAdcTriggerPoint(etmrBase);
 
     (void)eTMR_DRV_SetLdok(MOTOR_HW_ETMR_INSTANCE);
 }

@@ -22,11 +22,11 @@
 
 /* ------------------------------ App behavior ------------------------------ */
 
-/* Enable automatic startup from main() after initialization. */
-#define MOTOR_APP_AUTO_START                     (1U)
+/* 首次实机调试建议关闭自动起转，确认采样和PWM正常后再打开。 */
+#define MOTOR_APP_AUTO_START                     (0U)
 
 /* Default mechanical speed target exposed to the application interface. */
-#define MOTOR_CFG_DEFAULT_TARGET_RPM             (300.0f)
+#define MOTOR_CFG_DEFAULT_TARGET_RPM             (500.0f)
 
 /* Default direction used at startup. Valid values are +1 or -1. */
 #define MOTOR_CFG_DEFAULT_DIRECTION              (1)
@@ -37,19 +37,19 @@
  * eTMR uses FAST_BUS_CLK on this SoC. The current board clock configuration
  * runs FAST_BUS at the full PLL rate.
  */
-#define MOTOR_CFG_ETMR_CLOCK_HZ                  (240000000UL)
+#define MOTOR_CFG_ETMR_CLOCK_HZ                  (120000000UL)
 
 /*
  * pTMR derives its time base from SLOW_BUS_CLK through the driver.
- * With the current board clock tree that resolves to 80 MHz.
+ * With the current board clock tree that resolves to 40 MHz.
  */
-#define MOTOR_CFG_PTMR_CLOCK_HZ                  (80000000UL)
+#define MOTOR_CFG_PTMR_CLOCK_HZ                  (40000000UL)
 
 /*
- * ADC protocol clock is configured at runtime from PLL / 8 = 30 MHz to stay
- * within the 2 MHz .. 32 MHz runtime limits enforced by the SDK.
+ * ADC protocol clock is configured at runtime from FIRC / 3 = 32 MHz to stay
+ * within the 1 MHz .. 32 MHz runtime limits enforced by the SDK.
  */
-#define MOTOR_CFG_ADC_CLOCK_HZ                   (30000000UL)
+#define MOTOR_CFG_ADC_CLOCK_HZ                   (32000000UL)
 
 /* ---------------------------- PWM / fast loop ----------------------------- */
 
@@ -70,8 +70,8 @@
 
 /* --------------------------- ADC / analog front end ----------------------- */
 
-/* ADC reference voltage in volts. */
-#define MOTOR_CFG_ADC_VREF_V                     (3.3f)
+/* ADC参考电平，当前硬件为5V。 */
+#define MOTOR_CFG_ADC_VREF_V                     (5.0f)
 
 /* ADC maximum raw count in 12-bit mode. */
 #define MOTOR_CFG_ADC_MAX_COUNTS                 (4095.0f)
@@ -85,14 +85,14 @@
 /*
  * Current-sense amplifier gain. Replace with the real analog front-end gain.
  */
-#define MOTOR_CFG_CURRENT_AMP_GAIN               (20.0f)
+#define MOTOR_CFG_CURRENT_AMP_GAIN               (10.0f)
 
 /*
  * Bus voltage divider: top resistor from bus to ADC input, bottom resistor from
  * ADC input to ground. Replace with the real board divider values.
  */
-#define MOTOR_CFG_VBUS_DIVIDER_R_TOP_OHM         (100000.0f)
-#define MOTOR_CFG_VBUS_DIVIDER_R_BOTTOM_OHM      (4700.0f)
+#define MOTOR_CFG_VBUS_DIVIDER_R_TOP_OHM         (4000.0f)
+#define MOTOR_CFG_VBUS_DIVIDER_R_BOTTOM_OHM      (1000.0f)
 
 /*
  * Number of software-triggered ADC frames used to calibrate phase-current
@@ -103,13 +103,17 @@
 /* ------------------------------- Protection ------------------------------- */
 
 /* Absolute software current fault threshold in amps. */
-#define MOTOR_CFG_PHASE_OVERCURRENT_A            (20.0f)
+#define MOTOR_CFG_PHASE_OVERCURRENT_A            (10.0f)
 
 /* DC bus under-voltage threshold in volts. */
-#define MOTOR_CFG_VBUS_UNDERVOLTAGE_V            (10.0f)
+#define MOTOR_CFG_VBUS_UNDERVOLTAGE_V            (7.0f)
 
 /* DC bus over-voltage threshold in volts. */
-#define MOTOR_CFG_VBUS_OVERVOLTAGE_V             (60.0f)
+/*
+ * 4k/1k 分压配合 5V ADC 满量程只能测到 25V 母线电压，因此软件过压阈值
+ * 必须低于 25V。若系统母线高于该范围，需要先修改硬件分压。
+ */
+#define MOTOR_CFG_VBUS_OVERVOLTAGE_V             (24.0f)
 
 /* Startup timeout before declaring a fault, in milliseconds. */
 #define MOTOR_CFG_STARTUP_TIMEOUT_MS             (3000U)
@@ -135,25 +139,39 @@
  * Mechanical pole-pair count. This only affects the interface layer and the
  * speed conversion between RPM and electrical radians/second.
  */
-#define MOTOR_CFG_POLE_PAIRS                     (7U)
+#define MOTOR_CFG_POLE_PAIRS                     (4U)
 
 /* Stator phase resistance in ohms. */
 #define MOTOR_CFG_RS_OHM                         (0.050f)
 
 /* D-axis inductance in henries. */
-#define MOTOR_CFG_LD_H                           (0.000040f)
+#define MOTOR_CFG_LS_H                           (0.00045158f)
+
+/* 初始调试阶段先假设表贴式电机无显著凸极特性，因此Ld=Lq=Ls。 */
+#define MOTOR_CFG_LD_H                           (MOTOR_CFG_LS_H)
 
 /* Q-axis inductance in henries. */
-#define MOTOR_CFG_LQ_H                           (0.000040f)
+#define MOTOR_CFG_LQ_H                           (MOTOR_CFG_LS_H)
 
 /*
  * Permanent-magnet flux linkage in volt-seconds/rad. This is a template value
  * used by the observer and should be replaced by motor-specific data.
  */
-#define MOTOR_CFG_FLUX_LINKAGE_VS                (0.0060f)
+/*
+ * 由外拖反电势估算磁链：
+ * AB线电压峰峰值 28.6V，电频 385Hz。
+ * 对正弦波，phase_peak = Vab_pp / (2 * sqrt(3))。
+ * lambda = phase_peak / omega_e。
+ */
+#define MOTOR_CFG_BEMF_AB_LINE_PP_V              (28.6f)
+#define MOTOR_CFG_BEMF_ELEC_FREQ_HZ              (385.0f)
+#define MOTOR_CFG_BEMF_PHASE_PEAK_V \
+    ((0.5f * MOTOR_CFG_BEMF_AB_LINE_PP_V) * MOTOR_CFG_INV_SQRT3_F)
+#define MOTOR_CFG_FLUX_LINKAGE_VS \
+    (MOTOR_CFG_BEMF_PHASE_PEAK_V / (MOTOR_CFG_TWO_PI_F * MOTOR_CFG_BEMF_ELEC_FREQ_HZ))
 
 /* Maximum commanded q-axis current during closed-loop operation. */
-#define MOTOR_CFG_MAX_IQ_A                       (10.0f)
+#define MOTOR_CFG_MAX_IQ_A                       (6.0f)
 
 /* ------------------------------ Current loop ------------------------------ */
 
@@ -178,13 +196,13 @@
 #define MOTOR_CFG_ALIGN_ANGLE_RAD                (0.0f)
 
 /* D-axis current applied during alignment. */
-#define MOTOR_CFG_ALIGN_CURRENT_A                (2.0f)
+#define MOTOR_CFG_ALIGN_CURRENT_A                (0.3f)
 
 /* Alignment duration in milliseconds. */
-#define MOTOR_CFG_ALIGN_TIME_MS                  (300U)
+#define MOTOR_CFG_ALIGN_TIME_MS                  (100U)
 
 /* Open-loop q-axis current during the startup ramp. */
-#define MOTOR_CFG_OPEN_LOOP_IQ_A                (3.5f)
+#define MOTOR_CFG_OPEN_LOOP_IQ_A                 (1.0f)
 
 /* Initial open-loop electrical speed magnitude in rad/s. */
 #define MOTOR_CFG_OPEN_LOOP_START_RAD_S          (40.0f)
@@ -207,10 +225,10 @@
 #define MOTOR_CFG_LAMBDA_COMP_BW_RAD_S           (80.0f)
 
 /* Lower clamp for estimated flux linkage. */
-#define MOTOR_CFG_LAMBDA_MIN_VS                  (0.0030f)
+#define MOTOR_CFG_LAMBDA_MIN_VS                  (0.0025f)
 
 /* Upper clamp for estimated flux linkage. */
-#define MOTOR_CFG_LAMBDA_MAX_VS                  (0.0120f)
+#define MOTOR_CFG_LAMBDA_MAX_VS                  (0.0048f)
 
 /* PLL proportional gain. */
 #define MOTOR_CFG_PLL_KP                         (400.0f)

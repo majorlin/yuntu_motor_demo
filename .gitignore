@@ -3,5 +3,6 @@
 build
 
 # USER IGNORE BEGIN
+*.csv
 
 # USER IGNORE END

@@ -2,10 +2,16 @@
 
 #include <stddef.h>
 
+#include "sdk_project_config.h"
 #include "motor_user_config.h"
 
 #define MOTOR_FOC_EPSILON_F                  (1.0e-6f)
 #define MOTOR_FOC_PLL_SPEED_LIMIT_RAD_S      (120000.0f)
+
+void MotorControl_ProfileRecordFocTiming(uint32_t focTotalCycles,
+                                         uint32_t observerCycles,
+                                         uint32_t currentLoopCycles,
+                                         uint32_t svmCycles);
 
 static float MotorFoc_Clamp(float value, float minValue, float maxValue)
 {
@@ -228,6 +234,21 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     float iqErr;
     float voltageMagnitude;
     float voltageScale;
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    const bool dwtEnabled = ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U);
+    uint32_t focStartCycles = 0U;
+    uint32_t sectionStartCycles = 0U;
+    uint32_t observerCycles = 0U;
+    uint32_t currentLoopCycles = 0U;
+    uint32_t svmCycles = 0U;
+#endif
+
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    if (dwtEnabled)
+    {
+        focStartCycles = DWT->CYCCNT;
+    }
+#endif
 
     MotorFoc_Clarke(input->phase_current_a,
                     input->phase_current_b,
@@ -270,6 +291,14 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     state->pll_phase_rad = MotorFoc_WrapAngle0ToTwoPi(state->pll_phase_rad + (observerSpeedRadS * dt));
     state->phase_error_rad = pllPhaseErrRad;
 
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    if (dwtEnabled)
+    {
+        observerCycles = DWT->CYCCNT - focStartCycles;
+        sectionStartCycles = DWT->CYCCNT;
+    }
+#endif
+
     MotorFoc_Park(&iab, input->control_angle_rad, &idq);
 
     idErr = input->id_target_a - idq.d;
@@ -291,6 +320,14 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
         state->current_pi_q_integrator_v *= voltageScale;
     }
 
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    if (dwtEnabled)
+    {
+        currentLoopCycles = DWT->CYCCNT - sectionStartCycles;
+        sectionStartCycles = DWT->CYCCNT;
+    }
+#endif
+
     MotorFoc_InvPark(&vdq, input->control_angle_rad, &vab);
     MotorFoc_SpaceVector(&vab,
                          MotorFoc_Clamp(input->bus_voltage_v, 1.0f, 1000.0f),
@@ -310,6 +347,17 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     state->last_i_beta_a = iab.beta;
     state->last_v_alpha_v = vab.alpha;
     state->last_v_beta_v = vab.beta;
+
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    if (dwtEnabled)
+    {
+        svmCycles = DWT->CYCCNT - sectionStartCycles;
+        MotorControl_ProfileRecordFocTiming(DWT->CYCCNT - focStartCycles,
+                                            observerCycles,
+                                            currentLoopCycles,
+                                            svmCycles);
+    }
+#endif
 }
 
 float MotorFoc_RunSpeedPi(motor_foc_state_t *state,

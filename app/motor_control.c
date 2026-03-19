@@ -7,6 +7,9 @@
 #include "motor_hw_ytm32.h"
 #include "motor_user_config.h"
 
+#define MOTOR_CTRL_DWT_LAR_KEY                   (0xC5ACCE55UL)
+#define MOTOR_CTRL_DWT_LAR                       (*((volatile uint32_t *)(DWT_BASE + 0xFB0UL)))
+
 typedef struct
 {
     motor_status_t status;
@@ -37,6 +40,7 @@ typedef struct
 } motor_control_ctx_t;
 
 static motor_control_ctx_t s_motorCtrl;
+volatile motor_fast_loop_profile_t g_motorFastLoopProfile;
 
 static float MotorControl_Clamp(float value, float minValue, float maxValue)
 {
@@ -52,6 +56,44 @@ static float MotorControl_Clamp(float value, float minValue, float maxValue)
     }
 
     return result;
+}
+
+static void MotorControl_ProfileRecordStat(volatile motor_cycle_stat_t *stat, uint32_t cycles)
+{
+    stat->last_cycles = cycles;
+    if ((stat->sample_count == 0U) || (cycles < stat->min_cycles))
+    {
+        stat->min_cycles = cycles;
+    }
+    if (cycles > stat->max_cycles)
+    {
+        stat->max_cycles = cycles;
+    }
+
+    stat->total_cycles += cycles;
+    stat->sample_count++;
+    stat->avg_cycles = (uint32_t)(stat->total_cycles / (uint64_t)stat->sample_count);
+}
+
+static bool MotorControl_EnableDwtCycleCounter(void)
+{
+    bool enabled = false;
+
+    SystemCoreClockUpdate();
+
+    if ((DWT->CTRL & DWT_CTRL_NOCYCCNT_Msk) == 0U)
+    {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        if (DWT->LSR != 0U)
+        {
+            MOTOR_CTRL_DWT_LAR = MOTOR_CTRL_DWT_LAR_KEY;
+        }
+        DWT->CYCCNT = 0U;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+        enabled = ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U);
+    }
+
+    return enabled;
 }
 
 static float MotorControl_SlewTowards(float currentValue, float targetValue, float step)
@@ -391,6 +433,10 @@ void MotorControl_Init(void)
     MotorFoc_Init(&s_motorCtrl.foc);
     MotorHwYtm32_Init();
     MotorHwYtm32_SetOutputsMasked(true);
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    MotorControl_ResetFastLoopProfile();
+    g_motorFastLoopProfile.dwt_enabled = MotorControl_EnableDwtCycleCounter();
+#endif
     MotorHwYtm32_StartSpeedLoopTimer();
 }
 
@@ -448,9 +494,40 @@ const motor_status_t *MotorControl_GetStatus(void)
     return &s_motorCtrl.status;
 }
 
+const volatile motor_fast_loop_profile_t *MotorControl_GetFastLoopProfile(void)
+{
+    return &g_motorFastLoopProfile;
+}
+
+void MotorControl_ResetFastLoopProfile(void)
+{
+    const bool dwtEnabled = ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U);
+
+    (void)memset((void *)&g_motorFastLoopProfile, 0, sizeof(g_motorFastLoopProfile));
+    SystemCoreClockUpdate();
+    if (dwtEnabled)
+    {
+        DWT->CYCCNT = 0U;
+    }
+    g_motorFastLoopProfile.dwt_enabled = dwtEnabled;
+    g_motorFastLoopProfile.core_clock_hz = SystemCoreClock;
+    g_motorFastLoopProfile.fast_loop_hz = MOTOR_CFG_PWM_FREQUENCY_HZ;
+}
+
 uint32_t MotorControl_GetTickMs(void)
 {
     return s_motorCtrl.tickMs;
+}
+
+void MotorControl_ProfileRecordFocTiming(uint32_t focTotalCycles,
+                                         uint32_t observerCycles,
+                                         uint32_t currentLoopCycles,
+                                         uint32_t svmCycles)
+{
+    MotorControl_ProfileRecordStat(&g_motorFastLoopProfile.foc_total, focTotalCycles);
+    MotorControl_ProfileRecordStat(&g_motorFastLoopProfile.foc_observer_pll, observerCycles);
+    MotorControl_ProfileRecordStat(&g_motorFastLoopProfile.foc_current_loop, currentLoopCycles);
+    MotorControl_ProfileRecordStat(&g_motorFastLoopProfile.foc_svm, svmCycles);
 }
 
 void ADC0_IRQHandler(void)
@@ -463,17 +540,21 @@ void ADC0_IRQHandler(void)
     float phaseCurrentC;
     float busVoltageV;
     float controlAngleRad;
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    uint32_t isrStartCycles = 0U;
+    uint32_t pwmStartCycles = 0U;
+    uint32_t pwmCycles = 0U;
+    uint32_t isrTotalCycles = 0U;
+    const bool dwtEnabled = g_motorFastLoopProfile.dwt_enabled;
 
-    if (!MotorHwYtm32_ReadTriggeredFrame(&rawFrame))
+    if (dwtEnabled)
     {
-        if (ADC_DRV_GetOvrRunOfConversionFlag(0U))
-        {
-            ADC_DRV_ClearOvrFlagCmd(0U);
-            MotorControl_LatchFault(MOTOR_FAULT_ADC_OVERRUN);
-        }
-        return;
+        isrStartCycles = DWT->CYCCNT;
     }
+#endif
 
+    rawFrame.overrun = false;
+    MotorHwYtm32_ReadTriggeredFrame(&rawFrame);
     if (rawFrame.overrun)
     {
         MotorControl_LatchFault(MOTOR_FAULT_ADC_OVERRUN);
@@ -484,11 +565,6 @@ void ADC0_IRQHandler(void)
     phaseCurrentB = MotorControl_CurrentFromRaw(rawFrame.current_b_raw, s_motorCtrl.currentOffsetBRaw);
     phaseCurrentC = MotorControl_CurrentFromRaw(rawFrame.current_c_raw, s_motorCtrl.currentOffsetCRaw);
     busVoltageV = (float)rawFrame.vbus_raw * MOTOR_CFG_ADC_COUNT_TO_VBUS_V;
-
-    s_motorCtrl.status.phase_current_a = phaseCurrentA;
-    s_motorCtrl.status.phase_current_b = phaseCurrentB;
-    s_motorCtrl.status.phase_current_c = phaseCurrentC;
-    s_motorCtrl.status.bus_voltage_v = busVoltageV;
 
     if (s_motorCtrl.status.state == MOTOR_STATE_OFFSET_CAL)
     {
@@ -566,10 +642,7 @@ void ADC0_IRQHandler(void)
 
     MotorFoc_RunFast(&s_motorCtrl.foc, &focInput, &focOutput);
 
-    s_motorCtrl.status.id_a = focOutput.id_a;
-    s_motorCtrl.status.iq_a = focOutput.iq_a;
     s_motorCtrl.status.electrical_speed_rad_s = focOutput.observer_speed_rad_s;
-    s_motorCtrl.status.mechanical_rpm = MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(focOutput.observer_speed_rad_s);
     s_motorCtrl.latestPhaseErrorRad = focOutput.phase_error_rad;
     s_motorCtrl.latestObserverAngleRad = focOutput.observer_angle_rad;
     s_motorCtrl.status.electrical_angle_rad =
@@ -582,7 +655,22 @@ void ADC0_IRQHandler(void)
         s_motorCtrl.outputsUnmasked = true;
     }
 
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    if (dwtEnabled)
+    {
+        pwmStartCycles = DWT->CYCCNT;
+    }
+#endif
     MotorHwYtm32_ApplyPhaseDuty(focOutput.duty_u, focOutput.duty_v, focOutput.duty_w);
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
+    if (dwtEnabled)
+    {
+        pwmCycles = DWT->CYCCNT - pwmStartCycles;
+        isrTotalCycles = DWT->CYCCNT - isrStartCycles;
+        MotorControl_ProfileRecordStat(&g_motorFastLoopProfile.pwm_update, pwmCycles);
+        MotorControl_ProfileRecordStat(&g_motorFastLoopProfile.adc_irq_total, isrTotalCycles);
+    }
+#endif
 }
 
 void pTMR0_Ch0_IRQHandler(void)

@@ -1,5 +1,6 @@
 #include "motor_hw_ytm32.h"
 
+#include "device_registers.h"
 #include "sdk_project_config.h"
 #include "motor_user_config.h"
 #include "etmr_hw_access.h"
@@ -48,6 +49,7 @@ static etmr_pwm_sync_t s_motorEtmrSync;
 static etmr_trig_config_t s_motorEtmrTrig;
 static etmr_trig_ch_param_t s_motorEtmrTrigChannel[1];
 static bool s_adcConfiguredForHardwareTrigger = true;
+static ADC_Type *const s_motorHwAdcBase = ADC0;
 
 static void MotorHwYtm32_SelectAdc0ExternalTriggerFromTmu(void)
 {
@@ -243,12 +245,22 @@ static void MotorHwYtm32_InitPtmr(void)
     (void)pTMR_DRV_InitChannel(MOTOR_HW_PTMR_INSTANCE, MOTOR_HW_PTMR_CHANNEL, &ptmrChannelConfig);
 }
 
-static bool MotorHwYtm32_ReadFifoFrame(motor_adc_raw_frame_t *frame)
+static inline void MotorHwYtm32_ClearAdcFlags(uint32_t clearMask)
 {
-    frame->current_a_raw = ADC_DRV_ReadFIFO(MOTOR_HW_ADC_INSTANCE);
-    frame->current_b_raw = ADC_DRV_ReadFIFO(MOTOR_HW_ADC_INSTANCE);
-    frame->current_c_raw = ADC_DRV_ReadFIFO(MOTOR_HW_ADC_INSTANCE);
-    frame->vbus_raw = ADC_DRV_ReadFIFO(MOTOR_HW_ADC_INSTANCE);
+    if (clearMask != 0U)
+    {
+        s_motorHwAdcBase->STS = clearMask;
+    }
+}
+
+static bool MotorHwYtm32_TryReadAdcFrame(motor_adc_raw_frame_t *frame)
+{
+    frame->overrun = ((s_motorHwAdcBase->STS & ADC_STS_OVR_MASK) != 0U);
+    frame->current_a_raw = (uint16_t)s_motorHwAdcBase->FIFO;
+    frame->current_b_raw = (uint16_t)s_motorHwAdcBase->FIFO;
+    frame->current_c_raw = (uint16_t)s_motorHwAdcBase->FIFO;
+    frame->vbus_raw = (uint16_t)s_motorHwAdcBase->FIFO;
+    MotorHwYtm32_ClearAdcFlags(ADC_STS_EOC_MASK | ADC_STS_EOSEQ_MASK | ADC_STS_OVR_MASK);
 
     return true;
 }
@@ -292,11 +304,10 @@ bool MotorHwYtm32_ReadSoftwareFrame(motor_adc_raw_frame_t *frame)
     }
 
     frame->overrun = false;
-    ADC_DRV_ClearEoseqFlagCmd(MOTOR_HW_ADC_INSTANCE);
-    ADC_DRV_ClearOvrFlagCmd(MOTOR_HW_ADC_INSTANCE);
+    MotorHwYtm32_ClearAdcFlags(ADC_STS_EOSEQ_MASK | ADC_STS_OVR_MASK);
     ADC_DRV_Start(MOTOR_HW_ADC_INSTANCE);
 
-    while ((timeout > 0U) && (!ADC_DRV_GetEndOfSequenceFlag(MOTOR_HW_ADC_INSTANCE)))
+    while ((timeout > 0U) && ((s_motorHwAdcBase->STS & ADC_STS_EOSEQ_MASK) == 0U))
     {
         timeout--;
     }
@@ -307,21 +318,7 @@ bool MotorHwYtm32_ReadSoftwareFrame(motor_adc_raw_frame_t *frame)
         return false;
     }
 
-    frame->overrun = ADC_DRV_GetOvrRunOfConversionFlag(MOTOR_HW_ADC_INSTANCE);
-    if (!MotorHwYtm32_ReadFifoFrame(frame))
-    {
-        ADC_DRV_ClearEoseqFlagCmd(MOTOR_HW_ADC_INSTANCE);
-        ADC_DRV_ClearOvrFlagCmd(MOTOR_HW_ADC_INSTANCE);
-        return false;
-    }
-
-    ADC_DRV_ClearEoseqFlagCmd(MOTOR_HW_ADC_INSTANCE);
-    if (frame->overrun)
-    {
-        ADC_DRV_ClearOvrFlagCmd(MOTOR_HW_ADC_INSTANCE);
-    }
-
-    return true;
+    return MotorHwYtm32_TryReadAdcFrame(frame);
 }
 
 void MotorHwYtm32_EnableFastLoopSampling(void)
@@ -345,26 +342,7 @@ void MotorHwYtm32_DisableFastLoopSampling(void)
 
 bool MotorHwYtm32_ReadTriggeredFrame(motor_adc_raw_frame_t *frame)
 {
-    if ((frame == NULL) || (!ADC_DRV_GetEndOfSequenceFlag(MOTOR_HW_ADC_INSTANCE)))
-    {
-        return false;
-    }
-
-    frame->overrun = ADC_DRV_GetOvrRunOfConversionFlag(MOTOR_HW_ADC_INSTANCE);
-    if (!MotorHwYtm32_ReadFifoFrame(frame))
-    {
-        ADC_DRV_ClearEoseqFlagCmd(MOTOR_HW_ADC_INSTANCE);
-        ADC_DRV_ClearOvrFlagCmd(MOTOR_HW_ADC_INSTANCE);
-        return false;
-    }
-
-    ADC_DRV_ClearEoseqFlagCmd(MOTOR_HW_ADC_INSTANCE);
-    if (frame->overrun)
-    {
-        ADC_DRV_ClearOvrFlagCmd(MOTOR_HW_ADC_INSTANCE);
-    }
-
-    return true;
+    return MotorHwYtm32_TryReadAdcFrame(frame);
 }
 
 void MotorHwYtm32_StartPwmTimeBase(void)

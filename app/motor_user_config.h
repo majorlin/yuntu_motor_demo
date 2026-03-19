@@ -65,6 +65,9 @@
 /* Requested deadtime between complementary switches, in nanoseconds. */
 #define MOTOR_CFG_DEADTIME_NS                    (500UL)
 
+/* Enable CM33 DWT-based timing statistics for the fast loop. */
+#define MOTOR_CFG_ENABLE_DWT_PROFILE             (1U)
+
 /*
  * Alpha/beta voltage modulation limit used by the SVM routine. This is a
  * conservative value expressed in V_alpha/V_beta per-unit of bus voltage.

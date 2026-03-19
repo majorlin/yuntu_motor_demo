@@ -47,11 +47,38 @@ typedef struct
     float target_rpm;
 } motor_status_t;
 
+typedef struct
+{
+    uint32_t last_cycles;
+    uint32_t min_cycles;
+    uint32_t max_cycles;
+    uint32_t avg_cycles;
+    uint64_t total_cycles;
+    uint32_t sample_count;
+} motor_cycle_stat_t;
+
+typedef struct
+{
+    bool dwt_enabled;
+    uint32_t core_clock_hz;
+    uint32_t fast_loop_hz;
+    motor_cycle_stat_t adc_irq_total;
+    motor_cycle_stat_t foc_total;
+    motor_cycle_stat_t foc_observer_pll;
+    motor_cycle_stat_t foc_current_loop;
+    motor_cycle_stat_t foc_svm;
+    motor_cycle_stat_t pwm_update;
+} motor_fast_loop_profile_t;
+
+extern volatile motor_fast_loop_profile_t g_motorFastLoopProfile;
+
 void MotorControl_Init(void);
 void MotorControl_Enable(bool enable);
 bool MotorControl_SetTargetRpm(float targetRpm);
 bool MotorControl_SetDirection(int8_t direction);
 const motor_status_t *MotorControl_GetStatus(void);
+const volatile motor_fast_loop_profile_t *MotorControl_GetFastLoopProfile(void);
+void MotorControl_ResetFastLoopProfile(void);
 uint32_t MotorControl_GetTickMs(void);
 
 #endif /* MOTOR_CONTROL_H */

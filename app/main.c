@@ -17,6 +17,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "motor_control.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,6 +56,8 @@ int main(void)
     /* USER CODE END 1 */ 
     Board_Init();
     /* USER CODE BEGIN 2 */
+    INT_SYS_ConfigInit();
+    MotorControl_Init();
     /* USER CODE END 2 */
 
     /* Infinite loop */

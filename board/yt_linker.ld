@@ -72,10 +72,12 @@ SECTIONS
         
         . = ALIGN(8);
         ARM_start = .;
+        __exidx_start = .;
         ARM.exidx_region_start = .;
         *(.ARM.exidx)
         *(.ARM.exidx*)
         ARM.exidx_region_end = .;
+        __exidx_end = .;
         
         ARM_end = .;
     } > TEXT

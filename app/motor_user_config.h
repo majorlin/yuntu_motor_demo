@@ -26,7 +26,7 @@
 #define MOTOR_APP_AUTO_START                     (0U)
 
 /* Default mechanical speed target exposed to the application interface. */
-#define MOTOR_CFG_DEFAULT_TARGET_RPM             (500.0f)
+#define MOTOR_CFG_DEFAULT_TARGET_RPM             (2500.0f)
 
 /* Upper clamp for runtime speed commands coming from keys or debugger. */
 #define MOTOR_CFG_MAX_TARGET_RPM                 (8500.0f)

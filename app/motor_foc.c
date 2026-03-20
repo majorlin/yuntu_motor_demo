@@ -13,7 +13,7 @@ void MotorControl_ProfileRecordFocTiming(uint32_t focTotalCycles,
                                          uint32_t currentLoopCycles,
                                          uint32_t svmCycles);
 
-static float MotorFoc_Clamp(float value, float minValue, float maxValue)
+static inline float MotorFoc_Clamp(float value, float minValue, float maxValue)
 {
     float result = value;
 
@@ -29,7 +29,7 @@ static float MotorFoc_Clamp(float value, float minValue, float maxValue)
     return result;
 }
 
-static float MotorFoc_Max3(float a, float b, float c)
+static inline float MotorFoc_Max3(float a, float b, float c)
 {
     float result = a;
 
@@ -46,7 +46,7 @@ static float MotorFoc_Max3(float a, float b, float c)
     return result;
 }
 
-static float MotorFoc_Min3(float a, float b, float c)
+static inline float MotorFoc_Min3(float a, float b, float c)
 {
     float result = a;
 
@@ -63,12 +63,12 @@ static float MotorFoc_Min3(float a, float b, float c)
     return result;
 }
 
-static float MotorFoc_FastAbs(float value)
+static inline float MotorFoc_FastAbs(float value)
 {
     return __builtin_fabsf(value);
 }
 
-static float MotorFoc_FastSqrt(float value)
+static inline float MotorFoc_FastSqrt(float value)
 {
     float safeValue = value;
 
@@ -80,28 +80,38 @@ static float MotorFoc_FastSqrt(float value)
     return __builtin_sqrtf(safeValue);
 }
 
-static float MotorFoc_FastSin(float angleRad)
+static void MotorFoc_FastSinCos(float angleRad, float *sinOut, float *cosOut)
 {
     const float b = 4.0f / MOTOR_CFG_PI_F;
     const float c = -4.0f / (MOTOR_CFG_PI_F * MOTOR_CFG_PI_F);
     const float p = 0.225f;
     float wrappedAngle = MotorFoc_WrapAngle0ToTwoPi(angleRad);
-    float y;
+    float sinInput = wrappedAngle;
+    float cosInput = wrappedAngle + MOTOR_CFG_HALF_PI_F;
+    float sinY;
+    float cosY;
 
-    if (wrappedAngle > MOTOR_CFG_PI_F)
+    if (sinInput > MOTOR_CFG_PI_F)
     {
-        wrappedAngle -= MOTOR_CFG_TWO_PI_F;
+        sinInput -= MOTOR_CFG_TWO_PI_F;
     }
 
-    y = (b * wrappedAngle) + (c * wrappedAngle * MotorFoc_FastAbs(wrappedAngle));
-    y = (p * ((y * MotorFoc_FastAbs(y)) - y)) + y;
+    if (cosInput >= MOTOR_CFG_TWO_PI_F)
+    {
+        cosInput -= MOTOR_CFG_TWO_PI_F;
+    }
+    if (cosInput > MOTOR_CFG_PI_F)
+    {
+        cosInput -= MOTOR_CFG_TWO_PI_F;
+    }
 
-    return y;
-}
+    sinY = (b * sinInput) + (c * sinInput * MotorFoc_FastAbs(sinInput));
+    sinY = (p * ((sinY * MotorFoc_FastAbs(sinY)) - sinY)) + sinY;
+    cosY = (b * cosInput) + (c * cosInput * MotorFoc_FastAbs(cosInput));
+    cosY = (p * ((cosY * MotorFoc_FastAbs(cosY)) - cosY)) + cosY;
 
-static float MotorFoc_FastCos(float angleRad)
-{
-    return MotorFoc_FastSin(angleRad + MOTOR_CFG_HALF_PI_F);
+    *sinOut = sinY;
+    *cosOut = cosY;
 }
 
 static float MotorFoc_FastAtan2(float y, float x)
@@ -133,35 +143,52 @@ static float MotorFoc_FastAtan2(float y, float x)
 
 static void MotorFoc_Clarke(float ia, float ib, float ic, motor_ab_frame_t *iab)
 {
-    iab->alpha = ((2.0f * ia) - ib - ic) * (1.0f / 3.0f);
-    iab->beta = (ib - ic) * MOTOR_CFG_INV_SQRT3_F;
+    (void)ic;
+    iab->alpha = ia;
+    iab->beta = (ia + ib + ib) * MOTOR_CFG_INV_SQRT3_F;
 }
 
-static void MotorFoc_Park(const motor_ab_frame_t *iab, float angleRad, motor_dq_frame_t *idq)
+static inline float MotorFoc_AngleDiffRaw(float targetAngleRad, float measuredAngleRad)
 {
-    const float sinAngle = MotorFoc_FastSin(angleRad);
-    const float cosAngle = MotorFoc_FastCos(angleRad);
+    float diffRad = targetAngleRad - measuredAngleRad;
 
+    if (diffRad > MOTOR_CFG_PI_F)
+    {
+        diffRad -= MOTOR_CFG_TWO_PI_F;
+    }
+    else if (diffRad < -MOTOR_CFG_PI_F)
+    {
+        diffRad += MOTOR_CFG_TWO_PI_F;
+    }
+
+    return diffRad;
+}
+
+static inline void MotorFoc_Park(const motor_ab_frame_t *iab,
+                                 float sinAngle,
+                                 float cosAngle,
+                                 motor_dq_frame_t *idq)
+{
     idq->d = (iab->alpha * cosAngle) + (iab->beta * sinAngle);
     idq->q = (-iab->alpha * sinAngle) + (iab->beta * cosAngle);
 }
 
-static void MotorFoc_InvPark(const motor_dq_frame_t *vdq, float angleRad, motor_ab_frame_t *vab)
+static inline void MotorFoc_InvPark(const motor_dq_frame_t *vdq,
+                                    float sinAngle,
+                                    float cosAngle,
+                                    motor_ab_frame_t *vab)
 {
-    const float sinAngle = MotorFoc_FastSin(angleRad);
-    const float cosAngle = MotorFoc_FastCos(angleRad);
-
     vab->alpha = (vdq->d * cosAngle) - (vdq->q * sinAngle);
     vab->beta = (vdq->d * sinAngle) + (vdq->q * cosAngle);
 }
 
-static void MotorFoc_SpaceVector(const motor_ab_frame_t *vab,
-                                 float busVoltageV,
-                                 float *dutyU,
-                                 float *dutyV,
-                                 float *dutyW)
+static inline void MotorFoc_SpaceVector(const motor_ab_frame_t *vab,
+                                        float busVoltageV,
+                                        float *dutyU,
+                                        float *dutyV,
+                                        float *dutyW)
 {
-    const float inverseBus = 1.0f / MotorFoc_Clamp(busVoltageV, 1.0f, 1000.0f);
+    const float inverseBus = 1.0f / busVoltageV;
     const float phaseU = vab->alpha * inverseBus;
     const float phaseV = ((-0.5f * vab->alpha) + (MOTOR_CFG_SQRT3_BY_2_F * vab->beta)) * inverseBus;
     const float phaseW = ((-0.5f * vab->alpha) - (MOTOR_CFG_SQRT3_BY_2_F * vab->beta)) * inverseBus;
@@ -172,6 +199,57 @@ static void MotorFoc_SpaceVector(const motor_ab_frame_t *vab,
     *dutyU = MotorFoc_Clamp(phaseU + offset, 0.0f, 1.0f);
     *dutyV = MotorFoc_Clamp(phaseV + offset, 0.0f, 1.0f);
     *dutyW = MotorFoc_Clamp(phaseW + offset, 0.0f, 1.0f);
+}
+
+#if (MOTOR_CFG_ENABLE_DEADTIME_COMP != 0U)
+static int8_t MotorFoc_UpdateDeadtimeCompSign(float phaseCurrentA,
+                                              float minCurrentA,
+                                              int8_t cachedSign)
+{
+    if (phaseCurrentA >= minCurrentA)
+    {
+        return 1;
+    }
+
+    if (phaseCurrentA <= -minCurrentA)
+    {
+        return -1;
+    }
+
+    return cachedSign;
+}
+#endif
+
+static void MotorFoc_ApplyDeadtimeComp(motor_foc_state_t *state,
+                                       const motor_foc_fast_input_t *input,
+                                       motor_foc_fast_output_t *output)
+{
+#if (MOTOR_CFG_ENABLE_DEADTIME_COMP != 0U)
+    const float compDuty = MOTOR_CFG_DEADTIME_COMP_DUTY;
+
+    if ((!input->deadtime_comp_enable) || (compDuty <= 0.0f))
+    {
+        return;
+    }
+
+    state->deadtime_comp_sign_a = MotorFoc_UpdateDeadtimeCompSign(input->phase_current_a,
+                                                                  MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A,
+                                                                  state->deadtime_comp_sign_a);
+    state->deadtime_comp_sign_b = MotorFoc_UpdateDeadtimeCompSign(input->phase_current_b,
+                                                                  MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A,
+                                                                  state->deadtime_comp_sign_b);
+    state->deadtime_comp_sign_c = MotorFoc_UpdateDeadtimeCompSign(input->phase_current_c,
+                                                                  MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A,
+                                                                  state->deadtime_comp_sign_c);
+
+    output->duty_u = MotorFoc_Clamp(output->duty_u + (compDuty * (float)state->deadtime_comp_sign_a), 0.0f, 1.0f);
+    output->duty_v = MotorFoc_Clamp(output->duty_v + (compDuty * (float)state->deadtime_comp_sign_b), 0.0f, 1.0f);
+    output->duty_w = MotorFoc_Clamp(output->duty_w + (compDuty * (float)state->deadtime_comp_sign_c), 0.0f, 1.0f);
+#else
+    (void)state;
+    (void)input;
+    (void)output;
+#endif
 }
 
 void MotorFoc_Init(motor_foc_state_t *state)
@@ -205,6 +283,9 @@ void MotorFoc_Reset(motor_foc_state_t *state)
     state->last_i_beta_a = 0.0f;
     state->last_v_alpha_v = 0.0f;
     state->last_v_beta_v = 0.0f;
+    state->deadtime_comp_sign_a = 0;
+    state->deadtime_comp_sign_b = 0;
+    state->deadtime_comp_sign_c = 0;
 }
 
 void MotorFoc_RunFast(motor_foc_state_t *state,
@@ -212,7 +293,9 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
                       motor_foc_fast_output_t *output)
 {
     const float dt = MOTOR_CFG_FAST_LOOP_DT_S;
-    const float currentLoopLimitV = input->bus_voltage_v * MOTOR_CFG_SVM_MAX_MODULATION;
+    const float busVoltageClampedV = MotorFoc_Clamp(input->bus_voltage_v, 1.0f, 1000.0f);
+    const float currentLoopLimitV = busVoltageClampedV * MOTOR_CFG_SVM_MAX_MODULATION;
+    const float currentLoopLimitSq = currentLoopLimitV * currentLoopLimitV;
     const float observerInductanceH = 0.5f * (MOTOR_CFG_LD_H + MOTOR_CFG_LQ_H);
     const float lambdaNowVs = MotorFoc_Clamp(state->observer_lambda_vs,
                                              MOTOR_CFG_LAMBDA_MIN_VS,
@@ -232,7 +315,10 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     float observerSpeedRadS;
     float idErr;
     float iqErr;
+    float sinControlAngle;
+    float cosControlAngle;
     float voltageMagnitude;
+    float voltageMagnitudeSq;
     float voltageScale;
 #if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
     const bool dwtEnabled = ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U);
@@ -281,7 +367,7 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
                                   state->observer_lambda_vs);
 
     measuredObserverAngleRad = MotorFoc_WrapAngle0ToTwoPi(MotorFoc_FastAtan2(fluxBeta, fluxAlpha));
-    pllPhaseErrRad = MotorFoc_AngleDiff(measuredObserverAngleRad, state->pll_phase_rad);
+    pllPhaseErrRad = MotorFoc_AngleDiffRaw(measuredObserverAngleRad, state->pll_phase_rad);
     pllIntegralRadS = state->pll_speed_rad_s + (MOTOR_CFG_PLL_KI * pllPhaseErrRad * dt);
     pllIntegralRadS = MotorFoc_Clamp(pllIntegralRadS,
                                      -MOTOR_FOC_PLL_SPEED_LIMIT_RAD_S,
@@ -299,7 +385,8 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     }
 #endif
 
-    MotorFoc_Park(&iab, input->control_angle_rad, &idq);
+    MotorFoc_FastSinCos(input->control_angle_rad, &sinControlAngle, &cosControlAngle);
+    MotorFoc_Park(&iab, sinControlAngle, cosControlAngle, &idq);
 
     idErr = input->id_target_a - idq.d;
     iqErr = input->iq_target_a - idq.q;
@@ -310,9 +397,10 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     vdq.d = state->current_pi_d_integrator_v + (MOTOR_CFG_ID_KP_V_PER_A * idErr);
     vdq.q = state->current_pi_q_integrator_v + (MOTOR_CFG_IQ_KP_V_PER_A * iqErr);
 
-    voltageMagnitude = MotorFoc_FastSqrt((vdq.d * vdq.d) + (vdq.q * vdq.q));
-    if ((currentLoopLimitV > MOTOR_FOC_EPSILON_F) && (voltageMagnitude > currentLoopLimitV))
+    voltageMagnitudeSq = (vdq.d * vdq.d) + (vdq.q * vdq.q);
+    if ((currentLoopLimitV > MOTOR_FOC_EPSILON_F) && (voltageMagnitudeSq > currentLoopLimitSq))
     {
+        voltageMagnitude = MotorFoc_FastSqrt(voltageMagnitudeSq);
         voltageScale = currentLoopLimitV / voltageMagnitude;
         vdq.d *= voltageScale;
         vdq.q *= voltageScale;
@@ -328,19 +416,20 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     }
 #endif
 
-    MotorFoc_InvPark(&vdq, input->control_angle_rad, &vab);
+    MotorFoc_InvPark(&vdq, sinControlAngle, cosControlAngle, &vab);
     MotorFoc_SpaceVector(&vab,
-                         MotorFoc_Clamp(input->bus_voltage_v, 1.0f, 1000.0f),
+                         busVoltageClampedV,
                          &output->duty_u,
                          &output->duty_v,
                          &output->duty_w);
+    MotorFoc_ApplyDeadtimeComp(state, input, output);
 
     output->id_a = idq.d;
     output->iq_a = idq.q;
     output->observer_angle_rad = state->pll_phase_rad;
     output->observer_speed_rad_s = observerSpeedRadS;
-    output->phase_error_rad = MotorFoc_AngleDiff(input->control_angle_rad, state->pll_phase_rad);
-    output->bus_voltage_used_v = MotorFoc_Clamp(input->bus_voltage_v, 1.0f, 1000.0f);
+    output->phase_error_rad = MotorFoc_AngleDiffRaw(input->control_angle_rad, state->pll_phase_rad);
+    output->bus_voltage_used_v = busVoltageClampedV;
     output->commanded_vab_v = vab;
 
     state->last_i_alpha_a = iab.alpha;
@@ -394,12 +483,11 @@ float MotorFoc_WrapAngle0ToTwoPi(float angleRad)
 {
     float wrappedAngle = angleRad;
 
-    while (wrappedAngle >= MOTOR_CFG_TWO_PI_F)
+    if (wrappedAngle >= MOTOR_CFG_TWO_PI_F)
     {
         wrappedAngle -= MOTOR_CFG_TWO_PI_F;
     }
-
-    while (wrappedAngle < 0.0f)
+    else if (wrappedAngle < 0.0f)
     {
         wrappedAngle += MOTOR_CFG_TWO_PI_F;
     }
@@ -409,17 +497,6 @@ float MotorFoc_WrapAngle0ToTwoPi(float angleRad)
 
 float MotorFoc_AngleDiff(float targetAngleRad, float measuredAngleRad)
 {
-    float diffRad = MotorFoc_WrapAngle0ToTwoPi(targetAngleRad) -
-                    MotorFoc_WrapAngle0ToTwoPi(measuredAngleRad);
-
-    if (diffRad > MOTOR_CFG_PI_F)
-    {
-        diffRad -= MOTOR_CFG_TWO_PI_F;
-    }
-    else if (diffRad < -MOTOR_CFG_PI_F)
-    {
-        diffRad += MOTOR_CFG_TWO_PI_F;
-    }
-
-    return diffRad;
+    return MotorFoc_AngleDiffRaw(MotorFoc_WrapAngle0ToTwoPi(targetAngleRad),
+                                 MotorFoc_WrapAngle0ToTwoPi(measuredAngleRad));
 }

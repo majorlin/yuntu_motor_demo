@@ -58,7 +58,7 @@ static float MotorControl_Clamp(float value, float minValue, float maxValue)
     return result;
 }
 
-static void MotorControl_ProfileRecordStat(volatile motor_cycle_stat_t *stat, uint32_t cycles)
+static inline void MotorControl_ProfileRecordStat(volatile motor_cycle_stat_t *stat, uint32_t cycles)
 {
     stat->last_cycles = cycles;
     if ((stat->sample_count == 0U) || (cycles < stat->min_cycles))
@@ -72,7 +72,15 @@ static void MotorControl_ProfileRecordStat(volatile motor_cycle_stat_t *stat, ui
 
     stat->total_cycles += cycles;
     stat->sample_count++;
-    stat->avg_cycles = (uint32_t)(stat->total_cycles / (uint64_t)stat->sample_count);
+
+    if (stat->sample_count <= 1U)
+    {
+        stat->avg_cycles = cycles;
+    }
+    else
+    {
+        stat->avg_cycles += ((int32_t)cycles - (int32_t)stat->avg_cycles) >> 4;
+    }
 }
 
 static bool MotorControl_EnableDwtCycleCounter(void)
@@ -136,7 +144,7 @@ static void MotorControl_SetState(motor_control_state_t nextState)
     s_motorCtrl.stateTimeMs = 0U;
 }
 
-static float MotorControl_CurrentFromRaw(uint16_t rawValue, float rawOffset)
+static inline float MotorControl_CurrentFromRaw(uint16_t rawValue, float rawOffset)
 {
     return ((float)rawValue - rawOffset) * MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
 }
@@ -146,7 +154,7 @@ static float MotorControl_GetSignedDirection(void)
     return (s_motorCtrl.status.direction >= 0) ? 1.0f : -1.0f;
 }
 
-static float MotorControl_GetAlignAngle(void)
+static inline float MotorControl_GetAlignAngle(void)
 {
     float angleRad = MOTOR_CFG_ALIGN_ANGLE_RAD;
 
@@ -164,7 +172,7 @@ static float MotorControl_GetTargetElectricalSpeedRadS(void)
            MOTOR_CFG_MECH_RPM_TO_ELEC_RAD_S(s_motorCtrl.status.target_rpm);
 }
 
-static float MotorControl_BlendAngle(float fromAngleRad, float toAngleRad, float blend)
+static inline float MotorControl_BlendAngle(float fromAngleRad, float toAngleRad, float blend)
 {
     return MotorFoc_WrapAngle0ToTwoPi(fromAngleRad +
                                       (blend * MotorFoc_AngleDiff(toAngleRad, fromAngleRad)));
@@ -547,10 +555,15 @@ void ADC0_IRQHandler(void)
     uint32_t isrTotalCycles = 0U;
     const bool dwtEnabled = g_motorFastLoopProfile.dwt_enabled;
 
+    MotorHwYtm32_SetAdcIrqDebugPinHigh();
     if (dwtEnabled)
     {
         isrStartCycles = DWT->CYCCNT;
     }
+#endif
+
+#if (MOTOR_CFG_ENABLE_DWT_PROFILE == 0U)
+    MotorHwYtm32_SetAdcIrqDebugPinHigh();
 #endif
 
     rawFrame.overrun = false;
@@ -558,7 +571,7 @@ void ADC0_IRQHandler(void)
     if (rawFrame.overrun)
     {
         MotorControl_LatchFault(MOTOR_FAULT_ADC_OVERRUN);
-        return;
+        goto irq_exit;
     }
 
     phaseCurrentA = MotorControl_CurrentFromRaw(rawFrame.current_a_raw, s_motorCtrl.currentOffsetARaw);
@@ -582,13 +595,13 @@ void ADC0_IRQHandler(void)
             s_motorCtrl.currentOffsetCRaw = s_motorCtrl.currentOffsetCSum / sampleCount;
             MotorControl_StartAlign();
         }
-        return;
+        goto irq_exit;
     }
 
     if ((s_motorCtrl.status.state == MOTOR_STATE_STOP) ||
         (s_motorCtrl.status.state == MOTOR_STATE_FAULT))
     {
-        return;
+        goto irq_exit;
     }
 
     if (__builtin_fabsf(phaseCurrentA) > MOTOR_CFG_PHASE_OVERCURRENT_A ||
@@ -596,19 +609,19 @@ void ADC0_IRQHandler(void)
         __builtin_fabsf(phaseCurrentC) > MOTOR_CFG_PHASE_OVERCURRENT_A)
     {
         MotorControl_LatchFault(MOTOR_FAULT_OVERCURRENT);
-        return;
+        goto irq_exit;
     }
 
     if (busVoltageV < MOTOR_CFG_VBUS_UNDERVOLTAGE_V)
     {
         MotorControl_LatchFault(MOTOR_FAULT_VBUS_UNDERVOLTAGE);
-        return;
+        goto irq_exit;
     }
 
     if (busVoltageV > MOTOR_CFG_VBUS_OVERVOLTAGE_V)
     {
         MotorControl_LatchFault(MOTOR_FAULT_VBUS_OVERVOLTAGE);
-        return;
+        goto irq_exit;
     }
 
     if (s_motorCtrl.status.state == MOTOR_STATE_ALIGN)
@@ -623,6 +636,10 @@ void ADC0_IRQHandler(void)
         if (s_motorCtrl.status.state == MOTOR_STATE_OPEN_LOOP_RAMP)
         {
             controlAngleRad = s_motorCtrl.openLoopAngleRad;
+        }
+        else if (s_motorCtrl.closedLoopBlend >= 1.0f)
+        {
+            controlAngleRad = s_motorCtrl.latestObserverAngleRad;
         }
         else
         {
@@ -639,6 +656,7 @@ void ADC0_IRQHandler(void)
     focInput.control_angle_rad = controlAngleRad;
     focInput.id_target_a = s_motorCtrl.status.id_target_a;
     focInput.iq_target_a = s_motorCtrl.status.iq_target_a;
+    focInput.deadtime_comp_enable = (s_motorCtrl.status.state != MOTOR_STATE_ALIGN);
 
     MotorFoc_RunFast(&s_motorCtrl.foc, &focInput, &focOutput);
 
@@ -671,6 +689,9 @@ void ADC0_IRQHandler(void)
         MotorControl_ProfileRecordStat(&g_motorFastLoopProfile.adc_irq_total, isrTotalCycles);
     }
 #endif
+
+irq_exit:
+    MotorHwYtm32_SetAdcIrqDebugPinLow();
 }
 
 void pTMR0_Ch0_IRQHandler(void)

@@ -2,6 +2,7 @@
 #define MOTOR_FOC_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef enum
 {
@@ -31,6 +32,7 @@ typedef struct
     float control_angle_rad;
     float id_target_a;
     float iq_target_a;
+    bool deadtime_comp_enable;
 } motor_foc_fast_input_t;
 
 typedef struct
@@ -63,6 +65,9 @@ typedef struct
     float last_i_beta_a;
     float last_v_alpha_v;
     float last_v_beta_v;
+    int8_t deadtime_comp_sign_a;
+    int8_t deadtime_comp_sign_b;
+    int8_t deadtime_comp_sign_c;
 } motor_foc_state_t;
 
 void MotorFoc_Init(motor_foc_state_t *state);

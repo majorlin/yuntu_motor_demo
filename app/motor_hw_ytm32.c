@@ -51,6 +51,17 @@ static etmr_trig_ch_param_t s_motorEtmrTrigChannel[1];
 static bool s_adcConfiguredForHardwareTrigger = true;
 static ADC_Type *const s_motorHwAdcBase = ADC0;
 
+static void MotorHwYtm32_InitAdcIrqDebugPin(void)
+{
+    /* Repurpose PTC7 as a scope probe for ADC IRQ execution time. */
+    PINS_DRV_SetPullSel(PCTRLC, MOTOR_HW_ADC_IRQ_DEBUG_PIN, PCTRL_INTERNAL_PULL_NOT_ENABLED);
+    PINS_DRV_SetMuxModeSel(PCTRLC, MOTOR_HW_ADC_IRQ_DEBUG_PIN, PCTRL_MUX_AS_GPIO);
+    PINS_DRV_SetPinDirection(MOTOR_HW_ADC_IRQ_DEBUG_GPIO,
+                             MOTOR_HW_ADC_IRQ_DEBUG_PIN,
+                             GPIO_OUTPUT_DIRECTION);
+    MotorHwYtm32_SetAdcIrqDebugPinLow();
+}
+
 static void MotorHwYtm32_SelectAdc0ExternalTriggerFromTmu(void)
 {
     CIM->CTRL = (CIM->CTRL & ~CIM_CTRL_ADC0_TRIG_SEL_MASK) | CIM_CTRL_ADC0_TRIG_SEL(1U);
@@ -70,10 +81,10 @@ static void MotorHwYtm32_SetAdcTriggerPoint(eTMR_Type *const etmrBase)
     eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_U_LOW_CH, 0U);
 }
 
-static void MotorHwYtm32_WriteHighSidePwm(eTMR_Type *const etmrBase, uint8_t channel, float duty)
+static inline void MotorHwYtm32_WriteHighSidePwm(eTMR_Type *const etmrBase, uint8_t channel, float duty)
 {
     const uint32_t halfPeriodTicks = MOTOR_CFG_PWM_HALF_PERIOD_TICKS;
-    const float clampedDuty = (duty < 0.0f) ? 0.0f : ((duty > 1.0f) ? 1.0f : (1.0 - duty));
+    const float clampedDuty = (duty < 0.0f) ? 0.0f : ((duty > 1.0f) ? 1.0f : (1.0f - duty));
     const uint32_t edgeDelta = (uint32_t)(clampedDuty * (float)halfPeriodTicks);
 
     eTMR_SetChnVal0(etmrBase, channel, MOTOR_CFG_PWM_MID_TICKS - edgeDelta);
@@ -268,6 +279,7 @@ static bool MotorHwYtm32_TryReadAdcFrame(motor_adc_raw_frame_t *frame)
 void MotorHwYtm32_Init(void)
 {
     MotorHwYtm32_ConfigClocks();
+    MotorHwYtm32_InitAdcIrqDebugPin();
     MotorHwYtm32_SelectAdc0ExternalTriggerFromTmu();
     INT_SYS_DisableIRQ(ADC0_IRQn);
     MotorHwYtm32_ConfigAdc(true, false, false);

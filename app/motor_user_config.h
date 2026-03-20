@@ -66,7 +66,22 @@
 #define MOTOR_CFG_DEADTIME_NS                    (500UL)
 
 /* Enable CM33 DWT-based timing statistics for the fast loop. */
-#define MOTOR_CFG_ENABLE_DWT_PROFILE             (1U)
+#define MOTOR_CFG_ENABLE_DWT_PROFILE             (0U)
+
+/* Enable deadtime compensation in the FOC duty output path. */
+#ifndef MOTOR_CFG_ENABLE_DEADTIME_COMP
+#define MOTOR_CFG_ENABLE_DEADTIME_COMP           (0U)
+#endif
+
+/* Gain applied to the base deadtime duty compensation. */
+#ifndef MOTOR_CFG_DEADTIME_COMP_GAIN
+#define MOTOR_CFG_DEADTIME_COMP_GAIN             (1.0f)
+#endif
+
+/* Minimum phase current magnitude required to refresh the compensation sign. */
+#ifndef MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A
+#define MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A    (0.4f)
+#endif
 
 /*
  * Alpha/beta voltage modulation limit used by the SVM routine. This is a
@@ -193,8 +208,8 @@
  * Speed PI gains are intentionally exposed directly because the mechanical
  * plant depends on inertia, friction and load, which are not known yet.
  */
-#define MOTOR_CFG_SPEED_KP                       (0.010f)
-#define MOTOR_CFG_SPEED_KI                       (0.200f)
+#define MOTOR_CFG_SPEED_KP                       (0.006f)
+#define MOTOR_CFG_SPEED_KI                       (0.100f)
 
 /* Runtime speed-command ramp to avoid large torque steps when changing rpm. */
 #define MOTOR_CFG_SPEED_RAMP_RPM_PER_S           (600.0f)
@@ -267,6 +282,9 @@
 
 #define MOTOR_CFG_DEADTIME_TICKS \
     ((uint16_t)(((uint64_t)MOTOR_CFG_ETMR_CLOCK_HZ * (uint64_t)MOTOR_CFG_DEADTIME_NS) / 1000000000ULL))
+
+#define MOTOR_CFG_DEADTIME_COMP_DUTY \
+    (((float)MOTOR_CFG_DEADTIME_TICKS / (float)MOTOR_CFG_PWM_PERIOD_TICKS) * MOTOR_CFG_DEADTIME_COMP_GAIN)
 
 #define MOTOR_CFG_CURRENT_SENSE_V_PER_A \
     (MOTOR_CFG_PHASE_SHUNT_OHM * MOTOR_CFG_CURRENT_AMP_GAIN)

@@ -137,7 +137,7 @@
 #define MOTOR_CFG_VBUS_OVERVOLTAGE_V             (24.0f)
 
 /* Startup timeout before declaring a fault, in milliseconds. */
-#define MOTOR_CFG_STARTUP_TIMEOUT_MS             (3000U)
+#define MOTOR_CFG_STARTUP_TIMEOUT_MS             (300U)
 
 /* Allowed observer phase error during acquisition, in electrical radians. */
 #define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD    (0.45f)
@@ -194,6 +194,9 @@
 /* Maximum commanded q-axis current during closed-loop operation. */
 #define MOTOR_CFG_MAX_IQ_A                       (6.0f)
 
+/* Default q-axis current target used by the debugger-facing current mode. */
+#define MOTOR_CFG_DEFAULT_TARGET_IQ_A            (0.5f)
+
 /* ------------------------------ Current loop ------------------------------ */
 
 /*
@@ -226,7 +229,7 @@
 #define MOTOR_CFG_ALIGN_TIME_MS                  (10U)
 
 /* Open-loop q-axis current during the startup ramp. */
-#define MOTOR_CFG_OPEN_LOOP_IQ_A                 (1.0f)
+#define MOTOR_CFG_OPEN_LOOP_IQ_A                 (1.5f)
 
 /* Initial open-loop electrical speed magnitude in rad/s. */
 #define MOTOR_CFG_OPEN_LOOP_START_RAD_S          (40.0f)

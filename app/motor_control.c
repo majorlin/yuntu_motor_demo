@@ -35,7 +35,9 @@ typedef struct
     float latestObserverAngleRad;
     float observerPhaseOffsetRad;
     float observerLockResidualRad;
+    motor_control_mode_t controlModeRequest;
     float targetRpmCommand;
+    float targetIqCommandA;
     uint32_t tickMs;
 } motor_control_ctx_t;
 
@@ -56,6 +58,16 @@ static float MotorControl_Clamp(float value, float minValue, float maxValue)
     }
 
     return result;
+}
+
+static bool MotorControl_IsValidControlMode(motor_control_mode_t mode)
+{
+    return (mode == MOTOR_CONTROL_MODE_SPEED) || (mode == MOTOR_CONTROL_MODE_CURRENT);
+}
+
+static float MotorControl_ClampIqTarget(float targetIqA)
+{
+    return MotorControl_Clamp(targetIqA, -MOTOR_CFG_MAX_IQ_A, MOTOR_CFG_MAX_IQ_A);
 }
 
 static inline void MotorControl_ProfileRecordStat(volatile motor_cycle_stat_t *stat, uint32_t cycles)
@@ -216,6 +228,10 @@ static void MotorControl_EnterStop(void)
     s_motorCtrl.status.iq_a = 0.0f;
     s_motorCtrl.status.id_target_a = 0.0f;
     s_motorCtrl.status.iq_target_a = 0.0f;
+    s_motorCtrl.status.phase_current_a = 0.0f;
+    s_motorCtrl.status.phase_current_b = 0.0f;
+    s_motorCtrl.status.phase_current_c = 0.0f;
+    s_motorCtrl.status.bus_voltage_v = 0.0f;
     MotorControl_SetState(MOTOR_STATE_STOP);
 }
 
@@ -227,6 +243,8 @@ static void MotorControl_LatchFault(motor_fault_t fault)
     s_motorCtrl.outputsUnmasked = false;
     s_motorCtrl.status.fault = fault;
     s_motorCtrl.status.observer_locked = false;
+    s_motorCtrl.status.id_a = 0.0f;
+    s_motorCtrl.status.iq_a = 0.0f;
     s_motorCtrl.status.id_target_a = 0.0f;
     s_motorCtrl.status.iq_target_a = 0.0f;
     MotorControl_SetState(MOTOR_STATE_FAULT);
@@ -350,10 +368,17 @@ static void MotorControl_UpdateClosedLoopState(void)
     }
 
     s_motorCtrl.status.id_target_a = 0.0f;
-    s_motorCtrl.status.iq_target_a = MotorFoc_RunSpeedPi(&s_motorCtrl.foc,
-                                                         MotorControl_GetTargetElectricalSpeedRadS(),
-                                                         s_motorCtrl.status.electrical_speed_rad_s,
-                                                         false);
+    if (s_motorCtrl.controlModeRequest == MOTOR_CONTROL_MODE_CURRENT)
+    {
+        s_motorCtrl.status.iq_target_a = s_motorCtrl.targetIqCommandA;
+    }
+    else
+    {
+        s_motorCtrl.status.iq_target_a = MotorFoc_RunSpeedPi(&s_motorCtrl.foc,
+                                                             MotorControl_GetTargetElectricalSpeedRadS(),
+                                                             s_motorCtrl.status.electrical_speed_rad_s,
+                                                             false);
+    }
 
     if (__builtin_fabsf(s_motorCtrl.latestPhaseErrorRad) > MOTOR_CFG_OBSERVER_LOSS_PHASE_ERR_RAD)
     {
@@ -431,9 +456,12 @@ void MotorControl_Init(void)
 
     s_motorCtrl.status.state = MOTOR_STATE_STOP;
     s_motorCtrl.status.fault = MOTOR_FAULT_NONE;
+    s_motorCtrl.status.control_mode = MOTOR_CONTROL_MODE_CURRENT;
     s_motorCtrl.status.direction = MOTOR_CFG_DEFAULT_DIRECTION;
     s_motorCtrl.status.target_rpm = MOTOR_CFG_DEFAULT_TARGET_RPM;
+    s_motorCtrl.controlModeRequest = MOTOR_CONTROL_MODE_CURRENT;
     s_motorCtrl.targetRpmCommand = MOTOR_CFG_DEFAULT_TARGET_RPM;
+    s_motorCtrl.targetIqCommandA = MotorControl_ClampIqTarget(MOTOR_CFG_DEFAULT_TARGET_IQ_A);
     s_motorCtrl.status.electrical_angle_rad = MotorControl_GetAlignAngle();
     s_motorCtrl.enableRequest = (MOTOR_APP_AUTO_START != 0U);
     s_motorCtrl.status.enabled = s_motorCtrl.enableRequest;
@@ -462,6 +490,29 @@ void MotorControl_Enable(bool enable)
     SDK_EXIT_CRITICAL();
 }
 
+bool MotorControl_SetControlMode(motor_control_mode_t mode)
+{
+    bool accepted = false;
+
+    SDK_ENTER_CRITICAL();
+    if (MotorControl_IsValidControlMode(mode))
+    {
+        if ((mode == MOTOR_CONTROL_MODE_SPEED) &&
+            (s_motorCtrl.controlModeRequest != MOTOR_CONTROL_MODE_SPEED) &&
+            (s_motorCtrl.status.state == MOTOR_STATE_CLOSED_LOOP))
+        {
+            s_motorCtrl.foc.speed_pi_integrator_a = s_motorCtrl.status.iq_target_a;
+        }
+
+        s_motorCtrl.controlModeRequest = mode;
+        s_motorCtrl.status.control_mode = mode;
+        accepted = true;
+    }
+    SDK_EXIT_CRITICAL();
+
+    return accepted;
+}
+
 bool MotorControl_SetTargetRpm(float targetRpm)
 {
     float clampedTargetRpm = targetRpm;
@@ -475,6 +526,15 @@ bool MotorControl_SetTargetRpm(float targetRpm)
 
     SDK_ENTER_CRITICAL();
     s_motorCtrl.targetRpmCommand = clampedTargetRpm;
+    SDK_EXIT_CRITICAL();
+
+    return true;
+}
+
+bool MotorControl_SetTargetIqA(float targetIqA)
+{
+    SDK_ENTER_CRITICAL();
+    s_motorCtrl.targetIqCommandA = MotorControl_ClampIqTarget(targetIqA);
     SDK_EXIT_CRITICAL();
 
     return true;
@@ -578,6 +638,10 @@ void ADC0_IRQHandler(void)
     phaseCurrentB = MotorControl_CurrentFromRaw(rawFrame.current_b_raw, s_motorCtrl.currentOffsetBRaw);
     phaseCurrentC = MotorControl_CurrentFromRaw(rawFrame.current_c_raw, s_motorCtrl.currentOffsetCRaw);
     busVoltageV = (float)rawFrame.vbus_raw * MOTOR_CFG_ADC_COUNT_TO_VBUS_V;
+    s_motorCtrl.status.phase_current_a = phaseCurrentA;
+    s_motorCtrl.status.phase_current_b = phaseCurrentB;
+    s_motorCtrl.status.phase_current_c = phaseCurrentC;
+    s_motorCtrl.status.bus_voltage_v = busVoltageV;
 
     if (s_motorCtrl.status.state == MOTOR_STATE_OFFSET_CAL)
     {
@@ -661,6 +725,8 @@ void ADC0_IRQHandler(void)
     MotorFoc_RunFast(&s_motorCtrl.foc, &focInput, &focOutput);
 
     s_motorCtrl.status.electrical_speed_rad_s = focOutput.observer_speed_rad_s;
+    s_motorCtrl.status.id_a = focOutput.id_a;
+    s_motorCtrl.status.iq_a = focOutput.iq_a;
     s_motorCtrl.latestPhaseErrorRad = focOutput.phase_error_rad;
     s_motorCtrl.latestObserverAngleRad = focOutput.observer_angle_rad;
     s_motorCtrl.status.electrical_angle_rad =

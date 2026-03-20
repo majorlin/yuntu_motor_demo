@@ -36,7 +36,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/app/motor_foc.c
     ${CMAKE_SOURCE_DIR}/app/motor_control.c
     ${CMAKE_SOURCE_DIR}/app/motor_hw_ytm32.c
-    PROPERTIES COMPILE_OPTIONS "-O3;-ffast-math"
+    # PROPERTIES COMPILE_OPTIONS "-O3;-ffast-math"
 )
 
 # USER CODE BEGIN add_executable

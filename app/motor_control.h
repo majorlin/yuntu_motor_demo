@@ -26,10 +26,17 @@ typedef enum
     MOTOR_FAULT_BAD_DIRECTION
 } motor_fault_t;
 
+typedef enum
+{
+    MOTOR_CONTROL_MODE_SPEED = 0,
+    MOTOR_CONTROL_MODE_CURRENT
+} motor_control_mode_t;
+
 typedef struct
 {
     motor_control_state_t state;
     motor_fault_t fault;
+    motor_control_mode_t control_mode;
     bool observer_locked;
     bool enabled;
     int8_t direction;
@@ -74,7 +81,9 @@ extern volatile motor_fast_loop_profile_t g_motorFastLoopProfile;
 
 void MotorControl_Init(void);
 void MotorControl_Enable(bool enable);
+bool MotorControl_SetControlMode(motor_control_mode_t mode);
 bool MotorControl_SetTargetRpm(float targetRpm);
+bool MotorControl_SetTargetIqA(float targetIqA);
 bool MotorControl_SetDirection(int8_t direction);
 const motor_status_t *MotorControl_GetStatus(void);
 const volatile motor_fast_loop_profile_t *MotorControl_GetFastLoopProfile(void);

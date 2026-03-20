@@ -45,11 +45,15 @@ typedef struct
     volatile bool directionPending;
     volatile uint32_t startStopIrqTickMs;
     volatile uint32_t directionIrqTickMs;
+    uint32_t appliedControlMode;
+    float appliedIqCmdA;
     float appliedSpeedCmdRpm;
 } app_control_ctx_t;
 
 volatile bool g_motorRunCmd = (MOTOR_APP_AUTO_START != 0U);
 volatile int32_t g_motorDirectionCmd = MOTOR_CFG_DEFAULT_DIRECTION;
+volatile uint32_t g_motorControlModeCmd = (uint32_t)MOTOR_CONTROL_MODE_CURRENT;
+volatile float g_motorIqCmdA = MOTOR_CFG_DEFAULT_TARGET_IQ_A;
 volatile float g_motorSpeedCmdRpm = MOTOR_CFG_DEFAULT_TARGET_RPM;
 
 static app_control_ctx_t s_appCtrl;
@@ -59,7 +63,7 @@ static app_control_ctx_t s_appCtrl;
 /* USER CODE BEGIN PFDC */
 static void App_InitControlInputs(void);
 static void App_ProcessButtons(void);
-static void App_ProcessSpeedCommand(void);
+static void App_ProcessControlCommands(void);
 /* USER CODE END PFDC */
 static void Board_Init(void);
 
@@ -71,6 +75,8 @@ static void App_InitControlInputs(void)
     s_appCtrl.directionPending = false;
     s_appCtrl.startStopIrqTickMs = 0U;
     s_appCtrl.directionIrqTickMs = 0U;
+    s_appCtrl.appliedControlMode = g_motorControlModeCmd;
+    s_appCtrl.appliedIqCmdA = g_motorIqCmdA;
     s_appCtrl.appliedSpeedCmdRpm = g_motorSpeedCmdRpm;
 
     PINS_DRV_ClearPinIntFlagCmd(GPIOE, APP_BUTTON_START_STOP_PIN);
@@ -111,8 +117,22 @@ static void App_ProcessButtons(void)
     }
 }
 
-static void App_ProcessSpeedCommand(void)
+static void App_ProcessControlCommands(void)
 {
+    if (g_motorControlModeCmd != s_appCtrl.appliedControlMode)
+    {
+        if (MotorControl_SetControlMode((motor_control_mode_t)g_motorControlModeCmd))
+        {
+            s_appCtrl.appliedControlMode = g_motorControlModeCmd;
+        }
+    }
+
+    if (g_motorIqCmdA != s_appCtrl.appliedIqCmdA)
+    {
+        MotorControl_SetTargetIqA(g_motorIqCmdA);
+        s_appCtrl.appliedIqCmdA = g_motorIqCmdA;
+    }
+
     if (g_motorSpeedCmdRpm != s_appCtrl.appliedSpeedCmdRpm)
     {
         MotorControl_SetTargetRpm(g_motorSpeedCmdRpm);
@@ -154,6 +174,8 @@ int main(void)
     /* USER CODE BEGIN 2 */
     INT_SYS_ConfigInit();
     MotorControl_Init();
+    MotorControl_SetControlMode((motor_control_mode_t)g_motorControlModeCmd);
+    MotorControl_SetTargetIqA(g_motorIqCmdA);
     MotorControl_SetTargetRpm(g_motorSpeedCmdRpm);
     App_InitControlInputs();
     MotorControl_Enable(g_motorRunCmd);
@@ -166,7 +188,7 @@ int main(void)
         /* USER CODE END WHILE */
         /* USER CODE BEGIN 3 */
         App_ProcessButtons();
-        App_ProcessSpeedCommand();
+        App_ProcessControlCommands();
     }
     /* USER CODE END 3 */
 }

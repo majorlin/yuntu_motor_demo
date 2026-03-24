@@ -26,7 +26,7 @@
 #define MOTOR_APP_AUTO_START                     (0U)
 
 /* Default mechanical speed target exposed to the application interface. */
-#define MOTOR_CFG_DEFAULT_TARGET_RPM             (2500.0f)
+#define MOTOR_CFG_DEFAULT_TARGET_RPM             (1500.0f)
 
 /* Upper clamp for runtime speed commands coming from keys or debugger. */
 #define MOTOR_CFG_MAX_TARGET_RPM                 (8500.0f)
@@ -124,7 +124,7 @@
 /* ------------------------------- Protection ------------------------------- */
 
 /* Absolute software current fault threshold in amps. */
-#define MOTOR_CFG_PHASE_OVERCURRENT_A            (10.0f)
+#define MOTOR_CFG_PHASE_OVERCURRENT_A            (20.0f)
 
 /* DC bus under-voltage threshold in volts. */
 #define MOTOR_CFG_VBUS_UNDERVOLTAGE_V            (7.0f)
@@ -137,22 +137,22 @@
 #define MOTOR_CFG_VBUS_OVERVOLTAGE_V             (24.0f)
 
 /* Startup timeout before declaring a fault, in milliseconds. */
-#define MOTOR_CFG_STARTUP_TIMEOUT_MS             (300U)
+#define MOTOR_CFG_STARTUP_TIMEOUT_MS             (5000U)
 
 /* Allowed observer phase error during acquisition, in electrical radians. */
-#define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD    (0.45f)
+#define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD    (0.65f)
 
 /* Observer phase error above this value counts as lost lock. */
-#define MOTOR_CFG_OBSERVER_LOSS_PHASE_ERR_RAD    (0.90f)
+#define MOTOR_CFG_OBSERVER_LOSS_PHASE_ERR_RAD    (1.10f)
 
 /* Consecutive 1 kHz speed-loop samples required to accept observer lock. */
-#define MOTOR_CFG_OBSERVER_LOCK_COUNT            (80U)
+#define MOTOR_CFG_OBSERVER_LOCK_COUNT            (25U)
 
 /* Consecutive 1 kHz speed-loop samples that trigger observer-loss fault. */
 #define MOTOR_CFG_OBSERVER_LOSS_COUNT            (200U)
 
 /* Minimum electrical speed magnitude required before observer lock is accepted. */
-#define MOTOR_CFG_MIN_LOCK_ELEC_SPEED_RAD_S      (300.0f)
+#define MOTOR_CFG_MIN_LOCK_ELEC_SPEED_RAD_S      (80.0f)
 
 /* --------------------------- Motor electrical model ----------------------- */
 
@@ -160,13 +160,13 @@
  * Mechanical pole-pair count. This only affects the interface layer and the
  * speed conversion between RPM and electrical radians/second.
  */
-#define MOTOR_CFG_POLE_PAIRS                     (4U)
+#define MOTOR_CFG_POLE_PAIRS                     (3U)
 
 /* Stator phase resistance in ohms. */
-#define MOTOR_CFG_RS_OHM                         (0.050f)
+#define MOTOR_CFG_RS_OHM                         (0.105595f)
 
 /* D-axis inductance in henries. */
-#define MOTOR_CFG_LS_H                           (0.00045158f)
+#define MOTOR_CFG_LS_H                           (0.000130f)
 
 /* 初始调试阶段先假设表贴式电机无显著凸极特性，因此Ld=Lq=Ls。 */
 #define MOTOR_CFG_LD_H                           (MOTOR_CFG_LS_H)
@@ -180,22 +180,22 @@
  */
 /*
  * 由外拖反电势估算磁链：
- * AB线电压峰峰值 28.6V，电频 385Hz。
+ * 默认按 AB 线电压峰峰值 1.96V、电频 17Hz 计算。
  * 对正弦波，phase_peak = Vab_pp / (2 * sqrt(3))。
  * lambda = phase_peak / omega_e。
  */
-#define MOTOR_CFG_BEMF_AB_LINE_PP_V              (28.6f)
-#define MOTOR_CFG_BEMF_ELEC_FREQ_HZ              (385.0f)
+#define MOTOR_CFG_BEMF_AB_LINE_PP_V              (1.96f)
+#define MOTOR_CFG_BEMF_ELEC_FREQ_HZ              (17.0f)
 #define MOTOR_CFG_BEMF_PHASE_PEAK_V \
     ((0.5f * MOTOR_CFG_BEMF_AB_LINE_PP_V) * MOTOR_CFG_INV_SQRT3_F)
 #define MOTOR_CFG_FLUX_LINKAGE_VS \
     (MOTOR_CFG_BEMF_PHASE_PEAK_V / (MOTOR_CFG_TWO_PI_F * MOTOR_CFG_BEMF_ELEC_FREQ_HZ))
 
 /* Maximum commanded q-axis current during closed-loop operation. */
-#define MOTOR_CFG_MAX_IQ_A                       (6.0f)
+#define MOTOR_CFG_MAX_IQ_A                       (16.0f)
 
 /* Default q-axis current target used by the debugger-facing current mode. */
-#define MOTOR_CFG_DEFAULT_TARGET_IQ_A            (0.5f)
+#define MOTOR_CFG_DEFAULT_TARGET_IQ_A            (1.0f)
 
 /* ------------------------------ Current loop ------------------------------ */
 
@@ -203,7 +203,7 @@
  * Current-loop bandwidth in Hz. The PI gains below are derived from the motor
  * R/L model using a standard continuous-time approximation.
  */
-#define MOTOR_CFG_CURRENT_LOOP_BW_HZ             (1500.0f)
+#define MOTOR_CFG_CURRENT_LOOP_BW_HZ             (1200.0f)
 
 /* ------------------------------- Speed loop ------------------------------- */
 
@@ -211,11 +211,11 @@
  * Speed PI gains are intentionally exposed directly because the mechanical
  * plant depends on inertia, friction and load, which are not known yet.
  */
-#define MOTOR_CFG_SPEED_KP                       (0.006f)
-#define MOTOR_CFG_SPEED_KI                       (0.100f)
+#define MOTOR_CFG_SPEED_KP                       (0.0080f)
+#define MOTOR_CFG_SPEED_KI                       (0.020f)
 
 /* Runtime speed-command ramp to avoid large torque steps when changing rpm. */
-#define MOTOR_CFG_SPEED_RAMP_RPM_PER_S           (600.0f)
+#define MOTOR_CFG_SPEED_RAMP_RPM_PER_S           (400.0f)
 
 /* --------------------------- Startup / transition ------------------------- */
 
@@ -223,45 +223,45 @@
 #define MOTOR_CFG_ALIGN_ANGLE_RAD                (0.0f)
 
 /* D-axis current applied during alignment. */
-#define MOTOR_CFG_ALIGN_CURRENT_A                (0.5f)
+#define MOTOR_CFG_ALIGN_CURRENT_A                (3.0f)
 
 /* Alignment duration in milliseconds. */
-#define MOTOR_CFG_ALIGN_TIME_MS                  (100U)
+#define MOTOR_CFG_ALIGN_TIME_MS                  (200U)
 
 /* Open-loop q-axis current target. It ramps up from the alignment current magnitude. */
-#define MOTOR_CFG_OPEN_LOOP_IQ_A                 (3.0f)
+#define MOTOR_CFG_OPEN_LOOP_IQ_A                 (6.0f)
 
 /* Total time for the open-loop current/speed ramp. */
-#define MOTOR_CFG_OPEN_LOOP_RAMP_TIME_MS         (200U)
+#define MOTOR_CFG_OPEN_LOOP_RAMP_TIME_MS         (800U)
 
 /* Final open-loop electrical speed magnitude before handover to observer. */
-#define MOTOR_CFG_OPEN_LOOP_FINAL_RAD_S          (800.0f)
+#define MOTOR_CFG_OPEN_LOOP_FINAL_RAD_S          (150.0f)
 
 /* Closed-loop phase blend duration in milliseconds. */
-#define MOTOR_CFG_CLOSED_LOOP_BLEND_MS           (100U)
+#define MOTOR_CFG_CLOSED_LOOP_BLEND_MS           (300U)
 
 /* ------------------------- Observer / PLL parameters ---------------------- */
 
 /* Ortega observer correction gain. Larger values converge faster but add noise. */
-#define MOTOR_CFG_OBSERVER_GAIN                  (2.0e6f)
+#define MOTOR_CFG_OBSERVER_GAIN                  (1.8e6f)
 
 /* Flux magnitude compensation bandwidth in rad/s. */
 #define MOTOR_CFG_LAMBDA_COMP_BW_RAD_S           (80.0f)
 
 /* Lower clamp for estimated flux linkage. */
-#define MOTOR_CFG_LAMBDA_MIN_VS                  (0.0025f)
+#define MOTOR_CFG_LAMBDA_MIN_VS                  (0.0040f)
 
 /* Upper clamp for estimated flux linkage. */
-#define MOTOR_CFG_LAMBDA_MAX_VS                  (0.0048f)
+#define MOTOR_CFG_LAMBDA_MAX_VS                  (0.0072f)
 
 /* PLL proportional gain. */
-#define MOTOR_CFG_PLL_KP                         (400.0f)
+#define MOTOR_CFG_PLL_KP                         (320.0f)
 
 /* PLL integral gain. */
-#define MOTOR_CFG_PLL_KI                         (20000.0f)
+#define MOTOR_CFG_PLL_KI                         (16000.0f)
 
 /* 开环切环阶段对固定相位偏置的跟踪带宽。 */
-#define MOTOR_CFG_OBSERVER_PHASE_TRACK_BW_RAD_S  (40.0f)
+#define MOTOR_CFG_OBSERVER_PHASE_TRACK_BW_RAD_S  (20.0f)
 
 /* ------------------------------- Derived data ----------------------------- */
 

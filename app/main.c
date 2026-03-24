@@ -52,7 +52,7 @@ typedef struct
 
 volatile bool g_motorRunCmd = (MOTOR_APP_AUTO_START != 0U);
 volatile int32_t g_motorDirectionCmd = MOTOR_CFG_DEFAULT_DIRECTION;
-volatile uint32_t g_motorControlModeCmd = (uint32_t)MOTOR_CONTROL_MODE_CURRENT;
+volatile uint32_t g_motorControlModeCmd = (uint32_t)MOTOR_CONTROL_MODE_SPEED;
 volatile float g_motorIqCmdA = MOTOR_CFG_DEFAULT_TARGET_IQ_A;
 volatile float g_motorSpeedCmdRpm = MOTOR_CFG_DEFAULT_TARGET_RPM;
 

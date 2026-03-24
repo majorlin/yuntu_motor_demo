@@ -286,13 +286,12 @@ static void MotorControl_StartAlign(void)
 static void MotorControl_StartOpenLoop(void)
 {
     s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
-    s_motorCtrl.openLoopSpeedRadS = MotorControl_GetSignedDirection() *
-                                    MOTOR_CFG_OPEN_LOOP_START_RAD_S;
+    s_motorCtrl.openLoopSpeedRadS = 0.0f;
     s_motorCtrl.observerPhaseOffsetRad = s_motorCtrl.latestPhaseErrorRad;
     s_motorCtrl.observerLockResidualRad = 0.0f;
     s_motorCtrl.status.id_target_a = 0.0f;
     s_motorCtrl.status.iq_target_a = MotorControl_GetSignedDirection() *
-                                     MOTOR_CFG_OPEN_LOOP_IQ_A;
+                                     MOTOR_CFG_ALIGN_CURRENT_A;
     MotorControl_SetState(MOTOR_STATE_OPEN_LOOP_RAMP);
 }
 
@@ -311,7 +310,14 @@ static void MotorControl_StartClosedLoop(void)
 
 static void MotorControl_UpdateOpenLoopState(void)
 {
-    const float speedStepRadS = MOTOR_CFG_OPEN_LOOP_ACCEL_RAD_S2 * MOTOR_CFG_SPEED_LOOP_DT_S;
+    const float openLoopRampTimeS = (MOTOR_CFG_OPEN_LOOP_RAMP_TIME_MS > 0U) ?
+                                    ((float)MOTOR_CFG_OPEN_LOOP_RAMP_TIME_MS * 0.001f) :
+                                    MOTOR_CFG_SPEED_LOOP_DT_S;
+    const float speedStepRadS =
+        (__builtin_fabsf(MOTOR_CFG_OPEN_LOOP_FINAL_RAD_S) * MOTOR_CFG_SPEED_LOOP_DT_S) / openLoopRampTimeS;
+    const float iqStepA =
+        (__builtin_fabsf(MOTOR_CFG_OPEN_LOOP_IQ_A - MOTOR_CFG_ALIGN_CURRENT_A) * MOTOR_CFG_SPEED_LOOP_DT_S) /
+        openLoopRampTimeS;
     const float phaseTrackBlend = MotorControl_Clamp(MOTOR_CFG_OBSERVER_PHASE_TRACK_BW_RAD_S *
                                                      MOTOR_CFG_SPEED_LOOP_DT_S,
                                                      0.0f,
@@ -323,7 +329,7 @@ static void MotorControl_UpdateOpenLoopState(void)
 
     openLoopSpeedMagRadS = MotorControl_Clamp((__builtin_fabsf(s_motorCtrl.openLoopSpeedRadS) + speedStepRadS),
                                               0.0f,
-                                              MOTOR_CFG_OPEN_LOOP_HANDOVER_RAD_S);
+                                              MOTOR_CFG_OPEN_LOOP_FINAL_RAD_S);
     s_motorCtrl.openLoopSpeedRadS = MotorControl_GetSignedDirection() * openLoopSpeedMagRadS;
     s_motorCtrl.observerPhaseOffsetRad = MotorControl_BlendPhase(s_motorCtrl.observerPhaseOffsetRad,
                                                                  s_motorCtrl.latestPhaseErrorRad,
@@ -331,7 +337,10 @@ static void MotorControl_UpdateOpenLoopState(void)
     s_motorCtrl.observerLockResidualRad = MotorControl_WrapAngleSigned(
         MotorFoc_AngleDiff(s_motorCtrl.latestPhaseErrorRad, s_motorCtrl.observerPhaseOffsetRad));
     s_motorCtrl.status.id_target_a = 0.0f;
-    s_motorCtrl.status.iq_target_a = MotorControl_GetSignedDirection() * MOTOR_CFG_OPEN_LOOP_IQ_A;
+    s_motorCtrl.status.iq_target_a = MotorControl_SlewTowards(s_motorCtrl.status.iq_target_a,
+                                                              MotorControl_GetSignedDirection() *
+                                                                  MOTOR_CFG_OPEN_LOOP_IQ_A,
+                                                              iqStepA);
 
     if ((__builtin_fabsf(s_motorCtrl.status.electrical_speed_rad_s) >= MOTOR_CFG_MIN_LOCK_ELEC_SPEED_RAD_S) &&
         (__builtin_fabsf(s_motorCtrl.observerLockResidualRad) <= MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD))

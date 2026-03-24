@@ -8,11 +8,25 @@
 #define MOTOR_FOC_EPSILON_F                  (1.0e-6f)
 #define MOTOR_FOC_PLL_SPEED_LIMIT_RAD_S      (120000.0f)
 
+/**
+ * @brief Hook for profiling fast-loop timing (defined elsewhere).
+ * @param focTotalCycles     Total CPU cycles spent in FOC fast loop.
+ * @param observerCycles     CPU cycles spent in the observer.
+ * @param currentLoopCycles  CPU cycles spent in the current PI loop.
+ * @param svmCycles          CPU cycles spent in Space-Vector Modulation.
+ */
 void MotorControl_ProfileRecordFocTiming(uint32_t focTotalCycles,
                                          uint32_t observerCycles,
                                          uint32_t currentLoopCycles,
                                          uint32_t svmCycles);
 
+/**
+ * @brief Clamp a float value between a minimum and maximum.
+ * @param value     Input value.
+ * @param minValue  Lower bound.
+ * @param maxValue  Upper bound.
+ * @return Clamped value.
+ */
 static inline float MotorFoc_Clamp(float value, float minValue, float maxValue)
 {
     float result = value;
@@ -29,6 +43,13 @@ static inline float MotorFoc_Clamp(float value, float minValue, float maxValue)
     return result;
 }
 
+/**
+ * @brief Calculate the maximum of three float values.
+ * @param a First value.
+ * @param b Second value.
+ * @param c Third value.
+ * @return Maximum of a, b, and c.
+ */
 static inline float MotorFoc_Max3(float a, float b, float c)
 {
     float result = a;
@@ -46,6 +67,13 @@ static inline float MotorFoc_Max3(float a, float b, float c)
     return result;
 }
 
+/**
+ * @brief Calculate the minimum of three float values.
+ * @param a First value.
+ * @param b Second value.
+ * @param c Third value.
+ * @return Minimum of a, b, and c.
+ */
 static inline float MotorFoc_Min3(float a, float b, float c)
 {
     float result = a;
@@ -63,11 +91,24 @@ static inline float MotorFoc_Min3(float a, float b, float c)
     return result;
 }
 
+/**
+ * @brief Fast floating-point absolute value using compiler intrinsics.
+ * @param value Input value.
+ * @return Absolute value of input.
+ */
 static inline float MotorFoc_FastAbs(float value)
 {
     return __builtin_fabsf(value);
 }
 
+/**
+ * @brief Fast floating-point square root using compiler intrinsics.
+ *
+ * Ensures the input is non-negative before applying the square root.
+ *
+ * @param value Input value (should be >= 0).
+ * @return Square root of the input.
+ */
 static inline float MotorFoc_FastSqrt(float value)
 {
     float safeValue = value;
@@ -80,6 +121,18 @@ static inline float MotorFoc_FastSqrt(float value)
     return __builtin_sqrtf(safeValue);
 }
 
+/**
+ * @brief Fast sine/cosine approximation using a second-order polynomial with
+ * extra precision refinement (Bhaskara-style).
+ *
+ * The input angle is first wrapped to [0, 2*pi), then shifted to [-pi, pi) for
+ * the parabolic approximation: y = B*x + C*x*|x|, refined by y += P*(y*|y| - y).
+ * Cosine is computed by phase-shifting the input by pi/2.
+ *
+ * @param[in]  angleRad  Angle in radians.
+ * @param[out] sinOut    Pointer to store the calculated sine value.
+ * @param[out] cosOut    Pointer to store the calculated cosine value.
+ */
 static void MotorFoc_FastSinCos(float angleRad, float *sinOut, float *cosOut)
 {
     const float b = 4.0f / MOTOR_CFG_PI_F;
@@ -114,6 +167,16 @@ static void MotorFoc_FastSinCos(float angleRad, float *sinOut, float *cosOut)
     *cosOut = cosY;
 }
 
+/**
+ * @brief Fast two-argument arctangent approximation.
+ *
+ * Uses a first-order rational approximation with separate formulas for
+ * |x| >= |y| and |x| < |y| regions, providing ~0.07 rad maximum error.
+ *
+ * @param y Y coordinate.
+ * @param x X coordinate.
+ * @return Angle in radians [-pi, pi].
+ */
 static float MotorFoc_FastAtan2(float y, float x)
 {
     const float quarterPi = 0.78539816339744830962f;
@@ -141,6 +204,20 @@ static float MotorFoc_FastAtan2(float y, float x)
     return angle;
 }
 
+/**
+ * @brief Clarke transform (3-phase -> alpha-beta stationary frame).
+ *
+ * Converts three-phase currents (ia, ib, ic) into the two-axis stationary
+ * alpha-beta frame. Uses the amplitude-invariant form:
+ *   i_alpha = ia
+ *   i_beta  = (ia + 2*ib) / sqrt(3)
+ * Phase-c current is unused because ia + ib + ic = 0.
+ *
+ * @param[in]  ia   Phase A current.
+ * @param[in]  ib   Phase B current.
+ * @param[in]  ic   Phase C current (unused, assumed balanced).
+ * @param[out] iab  Pointer to the resulting alpha-beta frame structure.
+ */
 static void MotorFoc_Clarke(float ia, float ib, float ic, motor_ab_frame_t *iab)
 {
     (void)ic;
@@ -148,6 +225,16 @@ static void MotorFoc_Clarke(float ia, float ib, float ic, motor_ab_frame_t *iab)
     iab->beta = (ia + ib + ib) * MOTOR_CFG_INV_SQRT3_F;
 }
 
+/**
+ * @brief Compute the shortest signed angle difference (target - measured).
+ *
+ * Wraps the result to the range (-pi, pi].
+ * Assumes inputs are in a reasonable range (already mostly wrapped).
+ *
+ * @param targetAngleRad   The target angle in radians.
+ * @param measuredAngleRad The measured angle in radians.
+ * @return Shortest difference in radians.
+ */
 static inline float MotorFoc_AngleDiffRaw(float targetAngleRad, float measuredAngleRad)
 {
     float diffRad = targetAngleRad - measuredAngleRad;
@@ -164,6 +251,20 @@ static inline float MotorFoc_AngleDiffRaw(float targetAngleRad, float measuredAn
     return diffRad;
 }
 
+/**
+ * @brief Park transform (alpha-beta stationary -> d-q rotating frame).
+ *
+ * Projects the stationary-frame currents onto the rotating d-q axes
+ * aligned with the rotor flux:
+ *   id =  i_alpha * cos(theta) + i_beta * sin(theta)
+ *   iq = -i_alpha * sin(theta) + i_beta * cos(theta)
+ * where theta is the electrical angle of the rotor.
+ *
+ * @param[in]  iab       Current in alpha-beta frame.
+ * @param[in]  sinAngle  Sine of the electrical rotor angle.
+ * @param[in]  cosAngle  Cosine of the electrical rotor angle.
+ * @param[out] idq       Pointer to output d-q frame vector.
+ */
 static inline void MotorFoc_Park(const motor_ab_frame_t *iab,
                                  float sinAngle,
                                  float cosAngle,
@@ -173,6 +274,19 @@ static inline void MotorFoc_Park(const motor_ab_frame_t *iab,
     idq->q = (-iab->alpha * sinAngle) + (iab->beta * cosAngle);
 }
 
+/**
+ * @brief Inverse Park transform (d-q rotating -> alpha-beta stationary frame).
+ *
+ * Converts the d-q voltage commands back into the stationary frame for
+ * space-vector modulation:
+ *   v_alpha = vd * cos(theta) - vq * sin(theta)
+ *   v_beta  = vd * sin(theta) + vq * cos(theta)
+ *
+ * @param[in]  vdq       Voltage in d-q frame.
+ * @param[in]  sinAngle  Sine of the electrical rotor angle.
+ * @param[in]  cosAngle  Cosine of the electrical rotor angle.
+ * @param[out] vab       Pointer to output alpha-beta frame vector.
+ */
 static inline void MotorFoc_InvPark(const motor_dq_frame_t *vdq,
                                     float sinAngle,
                                     float cosAngle,
@@ -182,6 +296,22 @@ static inline void MotorFoc_InvPark(const motor_dq_frame_t *vdq,
     vab->beta = (vdq->d * sinAngle) + (vdq->q * cosAngle);
 }
 
+/**
+ * @brief Space-vector modulation with mid-clamp (centred) zero-sequence injection.
+ *
+ * 1. Convert alpha-beta voltages to three normalised phase voltages using
+ *    the inverse Clarke relationship and divide by bus voltage.
+ * 2. Apply a zero-sequence offset = 0.5 - 0.5*(max + min) to centre the
+ *    waveform in the [0, 1] duty range, equivalent to SVPWM and giving
+ *    ~15% more linear range than sinusoidal PWM.
+ * 3. Clamp the resulting duty cycles to [0, 1].
+ *
+ * @param[in]  vab          Commanded voltage in alpha-beta frame.
+ * @param[in]  busVoltageV  Available DC bus voltage in volts.
+ * @param[out] dutyU        Calculated phase U duty cycle [0.0, 1.0].
+ * @param[out] dutyV        Calculated phase V duty cycle [0.0, 1.0].
+ * @param[out] dutyW        Calculated phase W duty cycle [0.0, 1.0].
+ */
 static inline void MotorFoc_SpaceVector(const motor_ab_frame_t *vab,
                                         float busVoltageV,
                                         float *dutyU,
@@ -220,6 +350,16 @@ static int8_t MotorFoc_UpdateDeadtimeCompSign(float phaseCurrentA,
 }
 #endif
 
+/**
+ * @brief Apply dynamic deadtime compensation to the calculated duty cycles.
+ *
+ * Adjusts the phase duty cycles based on the polarity of the currents
+ * to compensate for the inverter dead-time voltage drops.
+ *
+ * @param[in,out] state   Persistent FOC state holding the current polarity signs.
+ * @param[in]     input   Fast-loop inputs (currents).
+ * @param[in,out] output  Fast-loop outputs (modifies duty cycles in place).
+ */
 static void MotorFoc_ApplyDeadtimeComp(motor_foc_state_t *state,
                                        const motor_foc_fast_input_t *input,
                                        motor_foc_fast_output_t *output)
@@ -336,13 +476,25 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     }
 #endif
 
+    /* ---- Clarke transform: 3-phase currents -> alpha-beta frame ---- */
     MotorFoc_Clarke(input->phase_current_a,
                     input->phase_current_b,
                     input->phase_current_c,
                     &iab);
 
+    /** 
+     * ---- Ortega nonlinear flux observer ----
+     * State variables x1, x2 track (flux + L*i) in the alpha-beta frame.
+     * The estimated rotor flux is:  psi = x - L_avg * i
+     */
+    /* Step 1: Extract the estimated flux from the observer states. */
     fluxAlpha = state->observer_x1 - (observerInductanceH * iab.alpha);
     fluxBeta = state->observer_x2 - (observerInductanceH * iab.beta);
+
+    /* Step 2: Compute the nonlinear correction error.
+     * err = lambda^2 - |psi|^2.  Only negative errors are used (i.e. the
+     * observer only corrects when estimated flux exceeds the expected
+     * magnitude), which makes the observer robust against noise. */
     fluxSq = (fluxAlpha * fluxAlpha) + (fluxBeta * fluxBeta);
     observerErr = (lambdaNowVs * lambdaNowVs) - fluxSq;
     if (observerErr > 0.0f)
@@ -350,6 +502,11 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
         observerErr = 0.0f;
     }
 
+    /* Step 3: Integrate the observer differential equations.
+     * dx/dt = v - Rs*i + gamma * psi * err
+     * The first two terms form the motor voltage model; the last term
+     * is the nonlinear correction that drives flux magnitude toward
+     * the expected permanent-magnet flux linkage (lambda). */
     state->observer_x1 += dt * (state->last_v_alpha_v -
                                 (MOTOR_CFG_RS_OHM * iab.alpha) +
                                 (MOTOR_CFG_OBSERVER_GAIN * fluxAlpha * observerErr));
@@ -357,15 +514,34 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
                                 (MOTOR_CFG_RS_OHM * iab.beta) +
                                 (MOTOR_CFG_OBSERVER_GAIN * fluxBeta * observerErr));
 
+    /* Step 4: Re-extract the updated flux and compute its magnitude. */
     fluxAlpha = state->observer_x1 - (observerInductanceH * iab.alpha);
     fluxBeta = state->observer_x2 - (observerInductanceH * iab.beta);
     fluxMagnitude = MotorFoc_FastSqrt((fluxAlpha * fluxAlpha) + (fluxBeta * fluxBeta));
+
+    /* Step 5: Adaptive flux-linkage tracking.
+     * Slowly adjust the expected lambda toward the measured flux magnitude
+     * using a first-order low-pass filter.  This compensates for
+     * temperature-related changes in permanent-magnet strength. */
     state->observer_lambda_vs += MotorFoc_Clamp(MOTOR_CFG_LAMBDA_COMP_BW_RAD_S * dt, 0.0f, 1.0f) *
                                  (MotorFoc_Clamp(fluxMagnitude,
                                                  MOTOR_CFG_LAMBDA_MIN_VS,
                                                  MOTOR_CFG_LAMBDA_MAX_VS) -
                                   state->observer_lambda_vs);
 
+    /** 
+     * ---- Phase-locked loop (PLL) for rotor angle and speed estimation ----
+     * The PLL tracks the observer flux angle to produce a smooth,
+     * continuous electrical angle and speed estimate.
+     *
+     * 1. Compute the instantaneous flux angle from atan2(psi_beta, psi_alpha).
+     * 2. Find the phase error between the measured flux angle and the
+     *    PLL's internal phase.
+     * 3. PI controller:
+     *      integral += Ki * error * dt        (speed estimate)
+     *      speed    = integral + Kp * error   (proportional boost)
+     * 4. Integrate speed to update the PLL phase. 
+     */
     measuredObserverAngleRad = MotorFoc_WrapAngle0ToTwoPi(MotorFoc_FastAtan2(fluxBeta, fluxAlpha));
     pllPhaseErrRad = MotorFoc_AngleDiffRaw(measuredObserverAngleRad, state->pll_phase_rad);
     pllIntegralRadS = state->pll_speed_rad_s + (MOTOR_CFG_PLL_KI * pllPhaseErrRad * dt);
@@ -385,9 +561,13 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     }
 #endif
 
+    /* ---- Park transform: alpha-beta -> d-q rotating frame ---- */
     MotorFoc_FastSinCos(input->control_angle_rad, &sinControlAngle, &cosControlAngle);
     MotorFoc_Park(&iab, sinControlAngle, cosControlAngle, &idq);
 
+    /* ---- Current-loop PI controllers (d-axis and q-axis) ----
+     * Compute the current errors and run independent PI regulators
+     * for the d-axis (flux) and q-axis (torque) currents. */
     idErr = input->id_target_a - idq.d;
     iqErr = input->iq_target_a - idq.q;
 
@@ -397,6 +577,10 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     vdq.d = state->current_pi_d_integrator_v + (MOTOR_CFG_ID_KP_V_PER_A * idErr);
     vdq.q = state->current_pi_q_integrator_v + (MOTOR_CFG_IQ_KP_V_PER_A * iqErr);
 
+    /* Voltage vector magnitude limiting with integrator anti-windup.
+     * If the combined dq voltage exceeds the available bus voltage
+     * (scaled by max modulation index), scale both axes proportionally
+     * and apply the same scale to the integrators to prevent windup. */
     voltageMagnitudeSq = (vdq.d * vdq.d) + (vdq.q * vdq.q);
     if ((currentLoopLimitV > MOTOR_FOC_EPSILON_F) && (voltageMagnitudeSq > currentLoopLimitSq))
     {
@@ -416,6 +600,7 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     }
 #endif
 
+    /* ---- Inverse Park + SVM: generate 3-phase PWM duty cycles ---- */
     MotorFoc_InvPark(&vdq, sinControlAngle, cosControlAngle, &vab);
     MotorFoc_SpaceVector(&vab,
                          busVoltageClampedV,
@@ -449,6 +634,18 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
 #endif
 }
 
+/**
+ * @brief Speed-loop PI controller.
+ *
+ * Computes the q-axis current reference (iq) from the speed error.
+ * Runs at the slower speed-loop rate (MOTOR_CFG_SPEED_LOOP_DT_S).
+ *
+ * @param[in,out] state                        FOC state holding the speed PI integrator.
+ * @param[in]     targetElectricalSpeedRadS    The requested electrical speed.
+ * @param[in]     measuredElectricalSpeedRadS  The actual electrical speed.
+ * @param[in]     resetIntegrator              Flag to reset the integrator if true.
+ * @return Commanded Q-axis current in amperes.
+ */
 float MotorFoc_RunSpeedPi(motor_foc_state_t *state,
                           float targetElectricalSpeedRadS,
                           float measuredElectricalSpeedRadS,

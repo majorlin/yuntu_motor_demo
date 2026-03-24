@@ -1,3 +1,8 @@
+/**
+ * @file motor_hw_ytm32.c
+ * @brief Hardware Abstraction Layer for YTM32 features used in FOC.
+ */
+
 #include "motor_hw_ytm32.h"
 
 #include "device_registers.h"
@@ -51,6 +56,9 @@ static etmr_trig_ch_param_t s_motorEtmrTrigChannel[1];
 static bool s_adcConfiguredForHardwareTrigger = true;
 static ADC_Type *const s_motorHwAdcBase = ADC0;
 
+/**
+ * @brief Initializes the debug scope probe pin for ADC IRQ duration tracing.
+ */
 static void MotorHwYtm32_InitAdcIrqDebugPin(void)
 {
     /* Repurpose PTC7 as a scope probe for ADC IRQ execution time. */
@@ -62,11 +70,17 @@ static void MotorHwYtm32_InitAdcIrqDebugPin(void)
     MotorHwYtm32_SetAdcIrqDebugPinLow();
 }
 
+/**
+ * @brief Select TMU trigger path for the ADC peripheral.
+ */
 static void MotorHwYtm32_SelectAdc0ExternalTriggerFromTmu(void)
 {
     CIM->CTRL = (CIM->CTRL & ~CIM_CTRL_ADC0_TRIG_SEL_MASK) | CIM_CTRL_ADC0_TRIG_SEL(1U);
 }
 
+/**
+ * @brief Configure source clocks for peripherals used in FOC.
+ */
 static void MotorHwYtm32_ConfigClocks(void)
 {
     CLOCK_DRV_SetModuleClock(ADC0_CLK, true, CLK_SRC_FIRC, DIV_BY_3);
@@ -75,12 +89,26 @@ static void MotorHwYtm32_ConfigClocks(void)
     CLOCK_DRV_SetModuleClock(pTMR0_CLK, true, CLK_SRC_DISABLED, DIV_BY_1);
 }
 
+/**
+ * @brief Configure the eTMR point where the ADC is triggered.
+ *
+ * Current sensing usually happens in the middle of the zero-vector (all low sides ON).
+ *
+ * @param etmrBase eTMR peripheral base pointer.
+ */
 static void MotorHwYtm32_SetAdcTriggerPoint(eTMR_Type *const etmrBase)
 {
     eTMR_SetChnVal0(etmrBase, MOTOR_HW_PWM_U_LOW_CH, 0U);
     eTMR_SetChnVal1(etmrBase, MOTOR_HW_PWM_U_LOW_CH, 0U);
 }
 
+/**
+ * @brief Center-align a duty cycle request onto an eTMR channel pair.
+ *
+ * @param etmrBase eTMR peripheral base pointer.
+ * @param channel  The primary (high-side) channel to configure.
+ * @param duty     Duty cycle phase fraction [0.0 - 1.0].
+ */
 static inline void MotorHwYtm32_WriteHighSidePwm(eTMR_Type *const etmrBase, uint8_t channel, float duty)
 {
     const uint32_t halfPeriodTicks = MOTOR_CFG_PWM_HALF_PERIOD_TICKS;
@@ -91,6 +119,10 @@ static inline void MotorHwYtm32_WriteHighSidePwm(eTMR_Type *const etmrBase, uint
     eTMR_SetChnVal1(etmrBase, channel, MOTOR_CFG_PWM_MID_TICKS + edgeDelta);
 }
 
+/**
+ * @brief Configure all output phases to an idle 50% duty cycle.
+ * @param etmrBase eTMR peripheral base pointer.
+ */
 static void MotorHwYtm32_SetNeutralPwm(eTMR_Type *const etmrBase)
 {
     MotorHwYtm32_WriteHighSidePwm(etmrBase, MOTOR_HW_PWM_U_HIGH_CH, 0.5f);
@@ -100,6 +132,13 @@ static void MotorHwYtm32_SetNeutralPwm(eTMR_Type *const etmrBase)
 }
 
 
+/**
+ * @brief Complete initialization of the ADC unit for either hardware or software trigger.
+ *
+ * @param hardwareTrigger    Set true to use eTMR/TMU, or false to use software execution.
+ * @param sequenceInterrupt  Enable sequence completion interrupt (usually ADC IRQ).
+ * @param overrunInterrupt   Enable overrun detection interrupt.
+ */
 static void MotorHwYtm32_ConfigAdc(bool hardwareTrigger, bool sequenceInterrupt, bool overrunInterrupt)
 {
     adc_converter_config_t adcConfig;
@@ -131,6 +170,9 @@ static void MotorHwYtm32_ConfigAdc(bool hardwareTrigger, bool sequenceInterrupt,
     s_adcConfiguredForHardwareTrigger = hardwareTrigger;
 }
 
+/**
+ * @brief Initialize the Trigger Mux Unit (TMU) routing eTMR to ADC.
+ */
 static void MotorHwYtm32_InitTmu(void)
 {
     const tmu_inout_mapping_config_t mapping = {
@@ -145,6 +187,9 @@ static void MotorHwYtm32_InitTmu(void)
     (void)TMU_DRV_Init(MOTOR_HW_TMU_INSTANCE, &config);
 }
 
+/**
+ * @brief Force immediate loading of PWM shadow registers.
+ */
 static void MotorHwYtm32_CommitShadowNow(void)
 {
     eTMR_Type *const etmrBase = g_etmrBase[MOTOR_HW_ETMR_INSTANCE];
@@ -157,6 +202,9 @@ static void MotorHwYtm32_CommitShadowNow(void)
     eTMR_SetRegLoadTrigSrc(etmrBase, DISABLE_TRIGGER);
 }
 
+/**
+ * @brief Initialize the primary eTMR hardware utilized for 3-phase PWM.
+ */
 static void MotorHwYtm32_InitEtmr(void)
 {
     etmr_user_config_t etmrConfig;
@@ -240,6 +288,9 @@ static void MotorHwYtm32_InitEtmr(void)
     eTMR_DRV_Disable(MOTOR_HW_ETMR_INSTANCE);
 }
 
+/**
+ * @brief Initialize the periodic timer (pTMR) driving the 1ms speed loop.
+ */
 static void MotorHwYtm32_InitPtmr(void)
 {
     ptmr_user_config_t ptmrConfig;
@@ -256,6 +307,10 @@ static void MotorHwYtm32_InitPtmr(void)
     (void)pTMR_DRV_InitChannel(MOTOR_HW_PTMR_INSTANCE, MOTOR_HW_PTMR_CHANNEL, &ptmrChannelConfig);
 }
 
+/**
+ * @brief Clear hardware ADC status flags safely.
+ * @param clearMask The bit-mask of flags to clear.
+ */
 static inline void MotorHwYtm32_ClearAdcFlags(uint32_t clearMask)
 {
     if (clearMask != 0U)
@@ -264,6 +319,11 @@ static inline void MotorHwYtm32_ClearAdcFlags(uint32_t clearMask)
     }
 }
 
+/**
+ * @brief Pop the acquired data out of the ADC FIFO into structured storage.
+ * @param[out] frame Pointer to structure receiving the raw results.
+ * @return True if retrieval was successful.
+ */
 static bool MotorHwYtm32_TryReadAdcFrame(motor_adc_raw_frame_t *frame)
 {
     frame->overrun = ((s_motorHwAdcBase->STS & ADC_STS_OVR_MASK) != 0U);

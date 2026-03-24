@@ -48,8 +48,8 @@ peripheral_clock_config_t clock_config0PeripheralClockConfig[12] = {
     {
         .clkName = ADC0_CLK,
         .clkGate = true,
-        .divider = DIV_BY_1,
-        .clkSrc = CLK_SRC_DISABLED,
+        .divider = DIV_BY_3,
+        .clkSrc = CLK_SRC_FIRC,
     },
     {
         .clkName = ADC1_CLK,

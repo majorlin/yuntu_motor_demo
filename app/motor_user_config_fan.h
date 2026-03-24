@@ -3,8 +3,9 @@
 
 #include <stdint.h>
 
-/*
- * User configuration for the YTM32 sensorless FOC stack.
+/**
+ * @file motor_user_config_fan.h
+ * @brief User configuration for the YTM32 sensorless FOC stack (Fan variant).
  *
  * The values in this file are safe compile-time templates and are not final
  * production numbers. Replace the board analog front-end values and motor
@@ -31,24 +32,27 @@
 /* Upper clamp for runtime speed commands coming from keys or debugger. */
 #define MOTOR_CFG_MAX_TARGET_RPM                 (8500.0f)
 
-/* Default direction used at startup. Valid values are +1 or -1. */
+/** @brief Default direction used at startup. Valid values are +1 or -1. */
 #define MOTOR_CFG_DEFAULT_DIRECTION              (1)
 
 /* ------------------------------ MCU clocks -------------------------------- */
 
-/*
+/**
+ * @brief eTMR base clock in Hz.
  * eTMR uses FAST_BUS_CLK on this SoC. The current board clock configuration
  * runs FAST_BUS at the full PLL rate.
  */
 #define MOTOR_CFG_ETMR_CLOCK_HZ                  (120000000UL)
 
-/*
+/**
+ * @brief pTMR base clock in Hz.
  * pTMR derives its time base from SLOW_BUS_CLK through the driver.
  * With the current board clock tree that resolves to 40 MHz.
  */
 #define MOTOR_CFG_PTMR_CLOCK_HZ                  (40000000UL)
 
-/*
+/**
+ * @brief ADC module clock in Hz.
  * ADC protocol clock is configured at runtime from FIRC / 3 = 32 MHz to stay
  * within the 1 MHz .. 32 MHz runtime limits enforced by the SDK.
  */
@@ -59,42 +63,42 @@
 /* PWM switching frequency. Higher values reduce current ripple but increase CPU load. */
 #define MOTOR_CFG_PWM_FREQUENCY_HZ               (20000UL)
 
-/* Speed loop frequency driven by pTMR0_CH0. */
+/** @brief Speed loop frequency driven by pTMR0_CH0. */
 #define MOTOR_CFG_SPEED_LOOP_HZ                  (1000UL)
 
 /* Requested deadtime between complementary switches, in nanoseconds. */
 #define MOTOR_CFG_DEADTIME_NS                    (500UL)
 
-/* Enable CM33 DWT-based timing statistics for the fast loop. */
+/** @brief Enable CM33 DWT-based timing statistics for the fast loop. */
 #define MOTOR_CFG_ENABLE_DWT_PROFILE             (0U)
 
-/* Enable deadtime compensation in the FOC duty output path. */
+/** @brief Enable deadtime compensation in the FOC duty output path. */
 #ifndef MOTOR_CFG_ENABLE_DEADTIME_COMP
 #define MOTOR_CFG_ENABLE_DEADTIME_COMP           (0U)
 #endif
 
-/* Gain applied to the base deadtime duty compensation. */
+/** @brief Gain applied to the base deadtime duty compensation. */
 #ifndef MOTOR_CFG_DEADTIME_COMP_GAIN
 #define MOTOR_CFG_DEADTIME_COMP_GAIN             (1.0f)
 #endif
 
-/* Minimum phase current magnitude required to refresh the compensation sign. */
+/** @brief Minimum phase current magnitude required to refresh the compensation sign. */
 #ifndef MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A
 #define MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A    (0.4f)
 #endif
 
-/*
- * Alpha/beta voltage modulation limit used by the SVM routine. This is a
- * conservative value expressed in V_alpha/V_beta per-unit of bus voltage.
+/**
+ * @brief Alpha/beta voltage modulation limit used by the SVM routine. 
+ * This is a conservative value expressed in V_alpha/V_beta per-unit of bus voltage.
  */
 #define MOTOR_CFG_SVM_MAX_MODULATION             (0.55f)
 
 /* --------------------------- ADC / analog front end ----------------------- */
 
-/* ADC参考电平，当前硬件为5V。 */
+/** @brief ADC reference voltage. The current hardware is 5V. */
 #define MOTOR_CFG_ADC_VREF_V                     (5.0f)
 
-/* ADC maximum raw count in 12-bit mode. */
+/** @brief ADC maximum raw count in 12-bit mode. */
 #define MOTOR_CFG_ADC_MAX_COUNTS                 (4095.0f)
 
 /*
@@ -115,8 +119,8 @@
 #define MOTOR_CFG_VBUS_DIVIDER_R_TOP_OHM         (4000.0f)
 #define MOTOR_CFG_VBUS_DIVIDER_R_BOTTOM_OHM      (1000.0f)
 
-/*
- * Number of software-triggered ADC frames used to calibrate phase-current
+/**
+ * @brief Number of software-triggered ADC frames used to calibrate phase-current
  * offsets before enabling PWM.
  */
 #define MOTOR_CFG_OFFSET_CAL_SAMPLES             (512U)
@@ -126,13 +130,16 @@
 /* Absolute software current fault threshold in amps. */
 #define MOTOR_CFG_PHASE_OVERCURRENT_A            (20.0f)
 
-/* DC bus under-voltage threshold in volts. */
+/** @brief DC bus under-voltage threshold in volts. */
 #define MOTOR_CFG_VBUS_UNDERVOLTAGE_V            (7.0f)
 
-/* DC bus over-voltage threshold in volts. */
-/*
- * 4k/1k 分压配合 5V ADC 满量程只能测到 25V 母线电压，因此软件过压阈值
- * 必须低于 25V。若系统母线高于该范围，需要先修改硬件分压。
+/** 
+ * @brief DC bus over-voltage threshold in volts.
+ * 
+ * Note: A 4k/1k divider combined with a 5V ADC full-scale range can only measure 
+ * up to 25V bus voltage. Therefore, the software overvoltage threshold must be 
+ * strictly less than 25V. If the system bus is higher, the hardware divider must 
+ * be adjusted first.
  */
 #define MOTOR_CFG_VBUS_OVERVOLTAGE_V             (24.0f)
 
@@ -148,7 +155,7 @@
 /* Consecutive 1 kHz speed-loop samples required to accept observer lock. */
 #define MOTOR_CFG_OBSERVER_LOCK_COUNT            (25U)
 
-/* Consecutive 1 kHz speed-loop samples that trigger observer-loss fault. */
+/** @brief Consecutive 1 kHz speed-loop samples that trigger observer-loss fault. */
 #define MOTOR_CFG_OBSERVER_LOSS_COUNT            (200U)
 
 /* Minimum electrical speed magnitude required before observer lock is accepted. */
@@ -168,10 +175,10 @@
 /* D-axis inductance in henries. */
 #define MOTOR_CFG_LS_H                           (0.000130f)
 
-/* 初始调试阶段先假设表贴式电机无显著凸极特性，因此Ld=Lq=Ls。 */
+/** @brief During initial debug, assume surface-mount (SPM) motor without salience: Ld = Lq = Ls. */
 #define MOTOR_CFG_LD_H                           (MOTOR_CFG_LS_H)
 
-/* Q-axis inductance in henries. */
+/** @brief Q-axis inductance in henries. */
 #define MOTOR_CFG_LQ_H                           (MOTOR_CFG_LS_H)
 
 /*
@@ -219,7 +226,7 @@
 
 /* --------------------------- Startup / transition ------------------------- */
 
-/* Fixed electrical angle used during rotor alignment. */
+/** @brief Fixed electrical angle used during rotor alignment. */
 #define MOTOR_CFG_ALIGN_ANGLE_RAD                (0.0f)
 
 /* D-axis current applied during alignment. */
@@ -231,7 +238,7 @@
 /* Open-loop q-axis current target. It ramps up from the alignment current magnitude. */
 #define MOTOR_CFG_OPEN_LOOP_IQ_A                 (6.0f)
 
-/* Total time for the open-loop current/speed ramp. */
+/** @brief Total time for the open-loop current/speed ramp. */
 #define MOTOR_CFG_OPEN_LOOP_RAMP_TIME_MS         (800U)
 
 /* Final open-loop electrical speed magnitude before handover to observer. */
@@ -245,7 +252,7 @@
 /* Ortega observer correction gain. Larger values converge faster but add noise. */
 #define MOTOR_CFG_OBSERVER_GAIN                  (1.8e6f)
 
-/* Flux magnitude compensation bandwidth in rad/s. */
+/** @brief Flux magnitude compensation bandwidth in rad/s. */
 #define MOTOR_CFG_LAMBDA_COMP_BW_RAD_S           (80.0f)
 
 /* Lower clamp for estimated flux linkage. */

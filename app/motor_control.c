@@ -352,6 +352,14 @@ static void MotorControl_BeginOffsetCalibration(void) {
  * @brief Transition step to Align mode injecting pure DC current.
  */
 static void MotorControl_StartAlign(void) {
+  /* Reset observer & PI integrators to prevent stale state from WindDetect
+   * or a previous failed startup corrupting the next Align -> OpenLoop
+   * transition. */
+  MotorFoc_Reset(&s_motorCtrl.foc);
+  s_motorCtrl.latestPhaseErrorRad = 0.0f;
+  s_motorCtrl.latestObserverAngleRad = 0.0f;
+  s_motorCtrl.observerPhaseOffsetRad = 0.0f;
+  s_motorCtrl.observerLockResidualRad = 0.0f;
   s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
   s_motorCtrl.openLoopSpeedRadS = 0.0f;
   s_motorCtrl.closedLoopBlend = 0.0f;
@@ -371,6 +379,7 @@ static void MotorControl_StartAlign(void) {
 static void MotorControl_StartOpenLoop(void) {
   s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
   s_motorCtrl.openLoopSpeedRadS = 0.0f;
+  s_motorCtrl.startupTimeMs = 0U;
   s_motorCtrl.observerPhaseOffsetRad = s_motorCtrl.latestPhaseErrorRad;
   s_motorCtrl.observerLockResidualRad = 0.0f;
   s_motorCtrl.status.id_target_a = 0.0f;
@@ -391,13 +400,23 @@ static void MotorControl_StartClosedLoop(void) {
   s_motorCtrl.observerLossCount = 0U;
   s_motorCtrl.status.observer_locked = true;
   s_motorCtrl.status.target_rpm = observedMechanicalRpm;
-  s_motorCtrl.foc.speed_pi_integrator_a = s_motorCtrl.status.iq_target_a;
+  /* Clamp integrator pre-load: open-loop injection current (5-8A) far exceeds
+   * the steady-state torque demand of a blower fan.  A large pre-load causes
+   * severe speed overshoot and oscillation on the first closed-loop cycles.
+   * Limit to half the open-loop current so the PI can ramp smoothly. */
+  s_motorCtrl.foc.speed_pi_integrator_a = MotorControl_Clamp(
+      s_motorCtrl.status.iq_target_a,
+      -MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f,
+       MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f);
   s_motorCtrl.fwIdTargetA = 0.0f;
   MotorControl_SetState(MOTOR_STATE_CLOSED_LOOP);
 }
 
 /* ========================= Wind Detect / Catch Spin ======================== */
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+
+/* Forward declaration — defined after UpdateWindDetectState which calls it. */
+static void MotorControl_StartCoastDown(void);
 
 /**
  * @brief Enter the Wind Detect state: observer runs on BEMF, PWM outputs masked.
@@ -480,9 +499,19 @@ static void MotorControl_UpdateWindDetectState(void) {
   /* Observer has converged — record detected speed */
   s_motorCtrl.windDetectSpeedRadS = currentSpeedRadS;
 
-  if (__builtin_fabsf(currentSpeedRadS) <
-      MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S) {
-    /* Rotor is essentially standstill — normal startup flow */
+  /* Flux magnitude validation: if the observer's estimated flux linkage is
+   * below the minimum threshold, the BEMF is too weak to trust the speed
+   * estimate. This filters out false CatchSpin triggers caused by ADC noise
+   * when the motor is actually stationary with near-zero BEMF. */
+  const float observerFluxVs = s_motorCtrl.foc.observer_lambda_vs;
+  const bool fluxTooLow =
+      (observerFluxVs < MOTOR_CFG_WIND_DETECT_MIN_FLUX_VS);
+
+  if (fluxTooLow ||
+      (__builtin_fabsf(currentSpeedRadS) <
+       MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S)) {
+    /* Rotor is essentially standstill or flux too weak to trust — normal
+     * startup flow */
     MotorControl_StartAlign();
     return;
   }
@@ -499,14 +528,72 @@ static void MotorControl_UpdateWindDetectState(void) {
       /* Speed within safe catch range — direct jump to closed-loop */
       MotorControl_StartCatchSpin();
     } else {
-      /* Speed too high — fall back to Align (motor will coast down) */
-      MotorControl_StartAlign();
+      /* Speed too high — coast down with outputs off, wait for safe speed */
+      MotorControl_StartCoastDown();
     }
   } else {
     /* Headwind: rotor spinning opposite to desired direction.
-     * Enter Align which will inject braking d-axis current and
-     * the open-loop ramp will overpower the reverse rotation. */
+     * No braking resistor — coast down with outputs off. */
+    MotorControl_StartCoastDown();
+  }
+}
+
+/**
+ * @brief Enter Coast-Down state with voltage-limited regenerative braking.
+ * Observer tracks the rotor while reverse Iq decelerates the motor.
+ * Bus voltage is monitored to prevent overvoltage on brakeless systems.
+ */
+static void MotorControl_StartCoastDown(void) {
+  const float speedSign =
+      (s_motorCtrl.status.electrical_speed_rad_s >= 0.0f) ? 1.0f : -1.0f;
+
+  /* Inject reverse Iq for regenerative braking */
+  s_motorCtrl.status.id_target_a = 0.0f;
+  s_motorCtrl.status.iq_target_a = -speedSign * MOTOR_CFG_COAST_BRAKE_IQ_A;
+
+  /* Un-mask PWM so braking current can flow */
+  MotorHwYtm32_SetOutputsMasked(false);
+  s_motorCtrl.outputsUnmasked = true;
+  MotorControl_SetState(MOTOR_STATE_COAST_DOWN);
+}
+
+/**
+ * @brief Periodic slow-loop handler for Coast-Down state.
+ * Dynamically adjusts braking Iq based on bus voltage to prevent overvoltage,
+ * and transitions to Align when speed is low enough.
+ */
+static void MotorControl_UpdateCoastDownState(void) {
+  s_motorCtrl.stateTimeMs++;
+  s_motorCtrl.startupTimeMs++;
+
+  const float absSpeedRadS =
+      __builtin_fabsf(s_motorCtrl.status.electrical_speed_rad_s);
+  const float speedSign =
+      (s_motorCtrl.status.electrical_speed_rad_s >= 0.0f) ? 1.0f : -1.0f;
+  const float vbus = s_motorCtrl.status.bus_voltage_v;
+
+  /* ---- Voltage-limited braking gain ----
+   * brakeGain = 1.0 when Vbus <= LIMIT          (full braking)
+   * brakeGain = 0.0 when Vbus >= LIMIT + HYST   (no braking, coast)
+   * Linear interpolation in between. */
+  float brakeGain = MotorControl_Clamp(
+      (MOTOR_CFG_COAST_BRAKE_VBUS_LIMIT_V + MOTOR_CFG_COAST_BRAKE_VBUS_HYST_V
+       - vbus) / MOTOR_CFG_COAST_BRAKE_VBUS_HYST_V,
+      0.0f, 1.0f);
+
+  s_motorCtrl.status.id_target_a = 0.0f;
+  s_motorCtrl.status.iq_target_a =
+      -speedSign * MOTOR_CFG_COAST_BRAKE_IQ_A * brakeGain;
+
+  /* When speed drops below safe threshold, enter normal Align startup */
+  if (absSpeedRadS < MOTOR_CFG_COAST_DOWN_SAFE_SPEED_RAD_S) {
     MotorControl_StartAlign();
+    return;
+  }
+
+  /* Global startup timeout protection */
+  if (s_motorCtrl.startupTimeMs >= MOTOR_CFG_STARTUP_TIMEOUT_MS) {
+    MotorControl_LatchFault(MOTOR_FAULT_STARTUP_TIMEOUT);
   }
 }
 
@@ -665,6 +752,10 @@ static void MotorControl_HandleSlowLoop(void) {
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
   case MOTOR_STATE_WIND_DETECT:
     MotorControl_UpdateWindDetectState();
+    break;
+
+  case MOTOR_STATE_COAST_DOWN:
+    MotorControl_UpdateCoastDownState();
     break;
 #endif
 
@@ -931,6 +1022,9 @@ void ADC0_IRQHandler(void) {
     /* During wind detect, use observer angle as control angle.
      * PWM outputs are masked so no current flows — observer runs on BEMF. */
     focInput.control_angle_rad = s_motorCtrl.latestObserverAngleRad;
+  } else if (s_motorCtrl.status.state == MOTOR_STATE_COAST_DOWN) {
+    /* Coast-down: observer angle drives Park transform for regen braking. */
+    focInput.control_angle_rad = s_motorCtrl.latestObserverAngleRad;
   }
 #endif
   else {
@@ -960,6 +1054,7 @@ void ADC0_IRQHandler(void) {
       (s_motorCtrl.status.state != MOTOR_STATE_ALIGN)
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
       && (s_motorCtrl.status.state != MOTOR_STATE_WIND_DETECT)
+      /* Coast-Down uses active braking — deadtime comp enabled */
 #endif
       ;
 
@@ -980,6 +1075,7 @@ void ADC0_IRQHandler(void) {
   if (!s_motorCtrl.outputsUnmasked
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
       && (s_motorCtrl.status.state != MOTOR_STATE_WIND_DETECT)
+      /* Coast-Down already un-masks in StartCoastDown for active braking */
 #endif
   ) {
     MotorHwYtm32_SetOutputsMasked(false);

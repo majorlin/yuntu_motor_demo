@@ -21,6 +21,7 @@ typedef enum
     MOTOR_STATE_STOP = 0,        /**< Motor stopped, PWM disabled.                */
     MOTOR_STATE_OFFSET_CAL,      /**< Calibrating ADC phase-current offsets.      */
     MOTOR_STATE_WIND_DETECT,     /**< Detecting rotor pre-rotation via observer.  */
+    MOTOR_STATE_COAST_DOWN,      /**< Coasting with PWM off, waiting for safe speed. */
     MOTOR_STATE_ALIGN,           /**< Rotor alignment with DC current injected.   */
     MOTOR_STATE_OPEN_LOOP_RAMP,  /**< Ramping speed/current for startup tracking. */
     MOTOR_STATE_CLOSED_LOOP,     /**< Normal sensorless FOC closed-loop operation.*/

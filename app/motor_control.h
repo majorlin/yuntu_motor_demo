@@ -41,7 +41,8 @@ typedef enum
     MOTOR_FAULT_OBSERVER_LOSS = 5,     /**< Observer phase error exceeded acceptable limit.*/
     MOTOR_FAULT_STARTUP_TIMEOUT = 6,   /**< Open-loop transitions failed to achieve lock. */
     MOTOR_FAULT_BAD_DIRECTION = 7,     /**< Rotation requested in unsupported direction.  */
-    MOTOR_FAULT_CATCH_FAIL = 8         /**< Tailwind catch-spin failed after attempts.    */
+    MOTOR_FAULT_CATCH_FAIL = 8,        /**< Tailwind catch-spin failed after attempts.    */
+    MOTOR_FAULT_STARTUP_FAIL = 9       /**< Startup failed after all retry attempts.      */
 } motor_fault_t;
 
 /**
@@ -76,6 +77,7 @@ typedef struct
     float id_target_a;               /**< Target commanded D-axis current (A).        */
     float iq_target_a;               /**< Target commanded Q-axis current (A).        */
     float target_rpm;                /**< Currently ramped/commanded target speed.    */
+    uint8_t startup_retry_count;     /**< Number of startup retries attempted so far. */
 } motor_status_t;
 
 /**

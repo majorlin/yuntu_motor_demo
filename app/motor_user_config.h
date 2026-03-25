@@ -265,6 +265,31 @@
 /* Closed-loop phase blend duration in milliseconds. */
 #define MOTOR_CFG_CLOSED_LOOP_BLEND_MS (300U)
 
+/* ======================== Startup Retry / Stall Detect ===================== */
+
+/** @brief Maximum number of automatic startup retries before hard fault.
+ * Set to 0 to disable retry (original timeout → fault behavior). */
+#define MOTOR_CFG_STARTUP_MAX_RETRIES (3U)
+
+/** @brief Q-axis current increment per retry attempt (A).
+ * Each retry adds this much Iq on top of the base open-loop current.
+ * 如果负载较重、首次启动电流不足以拖动转子，重试时逐级加大注入电流。 */
+#define MOTOR_CFG_STARTUP_IQ_BOOST_STEP_A (1.0f)
+
+/** @brief Upper limit for the total Iq boost across all retries (A).
+ * Prevents overcurrent even if BOOST_STEP × retries would exceed this. */
+#define MOTOR_CFG_STARTUP_IQ_BOOST_MAX_A (3.0f)
+
+/** @brief Angle residual (rad) above which the rotor is considered stalled
+ * during open-loop ramp. When |observerLockResidual| exceeds this threshold
+ * for STALL_ANGLE_DIV_COUNT consecutive speed-loop ticks, a stall is declared.
+ * 设定为略大于 π/2 (1.57 rad)，表示观测器角度与强制角度偏差过大。 */
+#define MOTOR_CFG_STALL_ANGLE_ERR_RAD (1.80f)
+
+/** @brief Consecutive 1 kHz speed-loop samples with angle divergence
+ * required to declare open-loop stall. 80 --> 80ms reaction time. */
+#define MOTOR_CFG_STALL_ANGLE_DIV_COUNT (80U)
+
 /* ========================= Wind Detect / Catch Spin ========================
  */
 

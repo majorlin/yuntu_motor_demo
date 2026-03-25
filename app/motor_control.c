@@ -54,6 +54,11 @@ typedef struct {
   /* Field weakening */
   float fwIdTargetA;                /* Field weakening d-axis current command */
   float voltageModulationRatio;     /* Latest |Vab|/Vbus from FOC output */
+
+  /* Startup retry / stall detection */
+  uint8_t  startupRetryCount;       /* Current retry attempt number */
+  float    startupIqBoostA;         /* Accumulated Iq boost for retries (A) */
+  uint32_t stallAngleDivCount;      /* Consecutive angle-divergence counter */
 } motor_control_ctx_t;
 
 static motor_control_ctx_t s_motorCtrl;
@@ -283,6 +288,10 @@ static void MotorControl_ResetRuntime(void) {
   s_motorCtrl.windCatchActive = false;
   s_motorCtrl.fwIdTargetA = 0.0f;
   s_motorCtrl.voltageModulationRatio = 0.0f;
+  s_motorCtrl.stallAngleDivCount = 0U;
+  /* NOTE: startupRetryCount and startupIqBoostA are NOT reset here —
+   * they must persist across retry attempts within a single enable cycle.
+   * They are only cleared in MotorControl_EnterStop(). */
   MotorFoc_Reset(&s_motorCtrl.foc);
 }
 
@@ -294,6 +303,10 @@ static void MotorControl_EnterStop(void) {
   MotorHwYtm32_DisableFastLoopSampling();
   MotorHwYtm32_SetOutputsMasked(true);
   MotorControl_ResetRuntime();
+  /* Full stop: clear retry state — next enable starts fresh */
+  s_motorCtrl.startupRetryCount = 0U;
+  s_motorCtrl.startupIqBoostA = 0.0f;
+  s_motorCtrl.status.startup_retry_count = 0U;
   s_motorCtrl.status.fault = MOTOR_FAULT_NONE;
   s_motorCtrl.status.observer_locked = false;
   s_motorCtrl.status.electrical_angle_rad = MotorControl_GetAlignAngle();
@@ -365,8 +378,12 @@ static void MotorControl_StartAlign(void) {
   s_motorCtrl.closedLoopBlend = 0.0f;
   s_motorCtrl.observerLockCount = 0U;
   s_motorCtrl.observerLossCount = 0U;
+  s_motorCtrl.stallAngleDivCount = 0U;
   s_motorCtrl.startupTimeMs = 0U;
-  s_motorCtrl.status.id_target_a = MOTOR_CFG_ALIGN_CURRENT_A;
+  /* Apply alignment current with retry boost: increase Id slightly on retries
+   * to strengthen rotor locking before open-loop sweep begins. */
+  s_motorCtrl.status.id_target_a =
+      MOTOR_CFG_ALIGN_CURRENT_A + (s_motorCtrl.startupIqBoostA * 0.5f);
   s_motorCtrl.status.iq_target_a = 0.0f;
   s_motorCtrl.status.observer_locked = false;
   s_motorCtrl.fastLoopRunning = true;
@@ -380,11 +397,13 @@ static void MotorControl_StartOpenLoop(void) {
   s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
   s_motorCtrl.openLoopSpeedRadS = 0.0f;
   s_motorCtrl.startupTimeMs = 0U;
+  s_motorCtrl.stallAngleDivCount = 0U;
   s_motorCtrl.observerPhaseOffsetRad = s_motorCtrl.latestPhaseErrorRad;
   s_motorCtrl.observerLockResidualRad = 0.0f;
   s_motorCtrl.status.id_target_a = 0.0f;
   s_motorCtrl.status.iq_target_a =
-      MotorControl_GetSignedDirection() * MOTOR_CFG_ALIGN_CURRENT_A;
+      MotorControl_GetSignedDirection() *
+      (MOTOR_CFG_ALIGN_CURRENT_A + s_motorCtrl.startupIqBoostA);
   MotorControl_SetState(MOTOR_STATE_OPEN_LOOP_RAMP);
 }
 
@@ -410,6 +429,41 @@ static void MotorControl_StartClosedLoop(void) {
        MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f);
   s_motorCtrl.fwIdTargetA = 0.0f;
   MotorControl_SetState(MOTOR_STATE_CLOSED_LOOP);
+}
+
+/* ========================= Startup Failure Retry ========================== */
+
+/**
+ * @brief Handle a startup failure: either retry with increased current or
+ * latch a hard fault if all retries are exhausted.
+ *
+ * Called when:
+ *  (a) Angle divergence stall is detected during open-loop ramp, or
+ *  (b) The startup timeout expires.
+ *
+ * On each retry the q-axis injection current is increased by a configured
+ * step to overcome higher load torque.  After the maximum number of retries
+ * the drive enters a permanent fault state requiring a disable/enable cycle.
+ */
+static void MotorControl_HandleStartupFailure(void) {
+  s_motorCtrl.startupRetryCount++;
+  s_motorCtrl.status.startup_retry_count = s_motorCtrl.startupRetryCount;
+
+  if (s_motorCtrl.startupRetryCount > MOTOR_CFG_STARTUP_MAX_RETRIES) {
+    /* All retries exhausted — latch a hard fault */
+    MotorControl_LatchFault(MOTOR_FAULT_STARTUP_FAIL);
+    return;
+  }
+
+  /* Compute progressive current boost for the next attempt */
+  s_motorCtrl.startupIqBoostA = MotorControl_Clamp(
+      (float)s_motorCtrl.startupRetryCount * MOTOR_CFG_STARTUP_IQ_BOOST_STEP_A,
+      0.0f, MOTOR_CFG_STARTUP_IQ_BOOST_MAX_A);
+
+  /* Mask outputs and re-enter alignment for a fresh startup attempt */
+  MotorHwYtm32_SetOutputsMasked(true);
+  s_motorCtrl.outputsUnmasked = false;
+  MotorControl_StartAlign();
 }
 
 /* ========================= Wind Detect / Catch Spin ======================== */
@@ -612,8 +666,12 @@ static void MotorControl_UpdateOpenLoopState(void) {
       (__builtin_fabsf(MOTOR_CFG_OPEN_LOOP_FINAL_RAD_S) *
        MOTOR_CFG_SPEED_LOOP_DT_S) /
       openLoopRampTimeS;
+  /* Open-loop final Iq target = base + retry boost */
+  const float openLoopIqFinalA =
+      MOTOR_CFG_OPEN_LOOP_IQ_A + s_motorCtrl.startupIqBoostA;
   const float iqStepA =
-      (__builtin_fabsf(MOTOR_CFG_OPEN_LOOP_IQ_A - MOTOR_CFG_ALIGN_CURRENT_A) *
+      (__builtin_fabsf(openLoopIqFinalA -
+                       (MOTOR_CFG_ALIGN_CURRENT_A + s_motorCtrl.startupIqBoostA)) *
        MOTOR_CFG_SPEED_LOOP_DT_S) /
       openLoopRampTimeS;
   const float phaseTrackBlend = MotorControl_Clamp(
@@ -638,8 +696,30 @@ static void MotorControl_UpdateOpenLoopState(void) {
   s_motorCtrl.status.id_target_a = 0.0f;
   s_motorCtrl.status.iq_target_a = MotorControl_SlewTowards(
       s_motorCtrl.status.iq_target_a,
-      MotorControl_GetSignedDirection() * MOTOR_CFG_OPEN_LOOP_IQ_A, iqStepA);
+      MotorControl_GetSignedDirection() * openLoopIqFinalA, iqStepA);
 
+  /* ---------- Angle Divergence Stall Detection ----------
+   * When the open-loop forced speed has ramped above the minimum lock speed,
+   * the observer should start converging.  If the angular residual between
+   * observer angle and forced angle stays above STALL_ANGLE_ERR_RAD for
+   * STALL_ANGLE_DIV_COUNT consecutive ticks, the rotor is not following the
+   * magnetic field → declare stall and trigger retry. */
+  if ((__builtin_fabsf(s_motorCtrl.openLoopSpeedRadS) >=
+       MOTOR_CFG_MIN_LOCK_ELEC_SPEED_RAD_S) &&
+      (__builtin_fabsf(s_motorCtrl.observerLockResidualRad) >
+       MOTOR_CFG_STALL_ANGLE_ERR_RAD)) {
+    s_motorCtrl.stallAngleDivCount++;
+  } else {
+    s_motorCtrl.stallAngleDivCount = 0U;
+  }
+
+  if (s_motorCtrl.stallAngleDivCount >= MOTOR_CFG_STALL_ANGLE_DIV_COUNT) {
+    /* Early stall detected — attempt retry with boosted current */
+    MotorControl_HandleStartupFailure();
+    return;
+  }
+
+  /* ---------- Observer Lock Check ---------- */
   if ((__builtin_fabsf(s_motorCtrl.status.electrical_speed_rad_s) >=
        MOTOR_CFG_MIN_LOCK_ELEC_SPEED_RAD_S) &&
       (__builtin_fabsf(s_motorCtrl.observerLockResidualRad) <=
@@ -650,12 +730,17 @@ static void MotorControl_UpdateOpenLoopState(void) {
   }
 
   if (s_motorCtrl.observerLockCount >= MOTOR_CFG_OBSERVER_LOCK_COUNT) {
+    /* Successful lock — clear retry state and enter closed-loop */
+    s_motorCtrl.startupRetryCount = 0U;
+    s_motorCtrl.startupIqBoostA = 0.0f;
+    s_motorCtrl.status.startup_retry_count = 0U;
     MotorControl_StartClosedLoop();
     return;
   }
 
+  /* ---------- Startup Timeout ---------- */
   if (s_motorCtrl.startupTimeMs >= MOTOR_CFG_STARTUP_TIMEOUT_MS) {
-    MotorControl_LatchFault(MOTOR_FAULT_STARTUP_TIMEOUT);
+    MotorControl_HandleStartupFailure();
   }
 }
 
@@ -762,7 +847,8 @@ static void MotorControl_HandleSlowLoop(void) {
   case MOTOR_STATE_ALIGN:
     s_motorCtrl.stateTimeMs++;
     s_motorCtrl.startupTimeMs++;
-    s_motorCtrl.status.id_target_a = MOTOR_CFG_ALIGN_CURRENT_A;
+    s_motorCtrl.status.id_target_a =
+        MOTOR_CFG_ALIGN_CURRENT_A + (s_motorCtrl.startupIqBoostA * 0.5f);
     s_motorCtrl.status.iq_target_a = 0.0f;
 
     if (s_motorCtrl.stateTimeMs >= MOTOR_CFG_ALIGN_TIME_MS) {

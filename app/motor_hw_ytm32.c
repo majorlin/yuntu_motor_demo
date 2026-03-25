@@ -342,10 +342,16 @@ void MotorHwYtm32_Init(void)
     MotorHwYtm32_InitAdcIrqDebugPin();
     MotorHwYtm32_SelectAdc0ExternalTriggerFromTmu();
     INT_SYS_DisableIRQ(ADC0_IRQn);
-    MotorHwYtm32_ConfigAdc(true, false, false);
+    MotorHwYtm32_ConfigAdc(true, true, true);
     MotorHwYtm32_InitEtmr();
+    /* Start ADC before connecting TMU trigger path — ADC must be ready
+     * to accept hardware triggers before they can arrive, otherwise
+     * the ADC peripheral deadlocks. */
+    ADC_DRV_Start(MOTOR_HW_ADC_INSTANCE);
     MotorHwYtm32_InitTmu();
     MotorHwYtm32_InitPtmr();
+    /* eTMR stays disabled here; it will be started on the first
+     * EnableFastLoopSampling() call and then never stopped again. */
     INT_SYS_SetPriority(ADC0_IRQn, MOTOR_HW_ADC_IRQ_PRIORITY);
     INT_SYS_SetPriority(pTMR0_Ch0_IRQn, MOTOR_HW_SPEED_IRQ_PRIORITY);
 }
@@ -396,20 +402,22 @@ bool MotorHwYtm32_ReadSoftwareFrame(motor_adc_raw_frame_t *frame)
 void MotorHwYtm32_EnableFastLoopSampling(void)
 {
     INT_SYS_DisableIRQ(ADC0_IRQn);
-    MotorHwYtm32_StopPwmTimeBase();
-    MotorHwYtm32_ConfigAdc(true, true, true);
-    ADC_DRV_Start(MOTOR_HW_ADC_INSTANCE);
+    /* Drain stale FIFO data accumulated while IRQ was disabled */
+    (void)s_motorHwAdcBase->FIFO;
+    (void)s_motorHwAdcBase->FIFO;
+    (void)s_motorHwAdcBase->FIFO;
+    (void)s_motorHwAdcBase->FIFO;
+    MotorHwYtm32_ClearAdcFlags(ADC_STS_EOC_MASK | ADC_STS_EOSEQ_MASK | ADC_STS_OVR_MASK);
+    INT_SYS_ClearPending(ADC0_IRQn);
     INT_SYS_EnableIRQ(ADC0_IRQn);
+    /* Ensure eTMR time base is running (idempotent if already enabled) */
     MotorHwYtm32_StartPwmTimeBase();
 }
 
 void MotorHwYtm32_DisableFastLoopSampling(void)
 {
     INT_SYS_DisableIRQ(ADC0_IRQn);
-    ADC_DRV_Stop(MOTOR_HW_ADC_INSTANCE);
-    MotorHwYtm32_StopPwmTimeBase();
     MotorHwYtm32_SetOutputsMasked(true);
-    MotorHwYtm32_ConfigAdc(true, false, false);
 }
 
 bool MotorHwYtm32_ReadTriggeredFrame(motor_adc_raw_frame_t *frame)

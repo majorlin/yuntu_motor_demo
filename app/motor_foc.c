@@ -616,6 +616,9 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     output->phase_error_rad = MotorFoc_AngleDiffRaw(input->control_angle_rad, state->pll_phase_rad);
     output->bus_voltage_used_v = busVoltageClampedV;
     output->commanded_vab_v = vab;
+    output->voltage_modulation_ratio =
+        MotorFoc_FastSqrt((vab.alpha * vab.alpha) + (vab.beta * vab.beta)) /
+        busVoltageClampedV;
 
     state->last_i_alpha_a = iab.alpha;
     state->last_i_beta_a = iab.beta;

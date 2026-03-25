@@ -247,6 +247,49 @@
 /* Closed-loop phase blend duration in milliseconds. */
 #define MOTOR_CFG_CLOSED_LOOP_BLEND_MS           (300U)
 
+/* ========================= Wind Detect / Catch Spin ======================== */
+
+/** @brief Enable wind detect before alignment (0 = disabled, traditional Align flow). */
+#define MOTOR_CFG_ENABLE_WIND_DETECT             (1U)
+
+/** @brief Wind detect observer settling timeout (ms). */
+#define MOTOR_CFG_WIND_DETECT_TIMEOUT_MS         (500U)
+
+/** @brief Electrical speed below which the rotor is considered standstill (rad/s). */
+#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S   (30.0f)
+
+/** @brief Number of consecutive speed-loop samples with stable speed to declare convergence. */
+#define MOTOR_CFG_WIND_DETECT_SETTLE_COUNT       (50U)
+
+/** @brief Maximum speed change per speed-loop tick for convergence check (rad/s). */
+#define MOTOR_CFG_WIND_DETECT_SPEED_TOL_RAD_S    (20.0f)
+
+/** @brief Maximum mechanical RPM for direct tailwind catch. Above this, brake first. */
+#define MOTOR_CFG_CATCH_MAX_SPEED_RPM            (6000.0f)
+
+/** @brief Braking q-axis current magnitude for headwind deceleration (A). */
+#define MOTOR_CFG_HEADWIND_BRAKE_IQ_A            (2.0f)
+
+/** @brief Electrical speed threshold to stop braking and enter Align (rad/s). */
+#define MOTOR_CFG_HEADWIND_BRAKE_STOP_RAD_S      (50.0f)
+
+/* ============================== Field Weakening ============================ */
+
+/** @brief Enable field weakening control (0 = disabled, id_target stays 0). */
+#define MOTOR_CFG_ENABLE_FIELD_WEAKENING         (1U)
+
+/** @brief Voltage modulation ratio threshold to start injecting negative Id (0~1). */
+#define MOTOR_CFG_FW_VOLTAGE_THRESHOLD           (0.50f)
+
+/** @brief Field weakening integral gain. Larger = faster response but may oscillate. */
+#define MOTOR_CFG_FW_KI                          (50.0f)
+
+/** @brief Maximum negative Id current for field weakening (A). Must be negative. */
+#define MOTOR_CFG_FW_MAX_NEGATIVE_ID_A           (-4.0f)
+
+/** @brief Recovery rate (A/s) for Id returning to zero when voltage margin restores. */
+#define MOTOR_CFG_FW_RECOVERY_RATE               (20.0f)
+
 /* ------------------------- Observer / PLL parameters ---------------------- */
 
 /* Ortega observer correction gain. Larger values converge faster but add noise. */

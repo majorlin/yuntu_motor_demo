@@ -71,6 +71,7 @@ typedef struct
     float phase_error_rad;           /**< Control-angle vs observer-angle error (rad). */
     float bus_voltage_used_v;        /**< Clamped bus voltage actually used (V).     */
     motor_ab_frame_t commanded_vab_v;/**< Output alpha-beta voltage command (V).    */
+    float voltage_modulation_ratio;  /**< |Vab| / Vbus ratio for field weakening.   */
 } motor_foc_fast_output_t;
 
 /**

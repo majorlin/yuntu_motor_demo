@@ -20,6 +20,7 @@ typedef enum
 {
     MOTOR_STATE_STOP = 0,        /**< Motor stopped, PWM disabled.                */
     MOTOR_STATE_OFFSET_CAL,      /**< Calibrating ADC phase-current offsets.      */
+    MOTOR_STATE_WIND_DETECT,     /**< Detecting rotor pre-rotation via observer.  */
     MOTOR_STATE_ALIGN,           /**< Rotor alignment with DC current injected.   */
     MOTOR_STATE_OPEN_LOOP_RAMP,  /**< Ramping speed/current for startup tracking. */
     MOTOR_STATE_CLOSED_LOOP,     /**< Normal sensorless FOC closed-loop operation.*/
@@ -38,7 +39,8 @@ typedef enum
     MOTOR_FAULT_VBUS_OVERVOLTAGE = 4,  /**< DC bus voltage exceeded maximum bound.        */
     MOTOR_FAULT_OBSERVER_LOSS = 5,     /**< Observer phase error exceeded acceptable limit.*/
     MOTOR_FAULT_STARTUP_TIMEOUT = 6,   /**< Open-loop transitions failed to achieve lock. */
-    MOTOR_FAULT_BAD_DIRECTION = 7      /**< Rotation requested in unsupported direction.  */
+    MOTOR_FAULT_BAD_DIRECTION = 7,     /**< Rotation requested in unsupported direction.  */
+    MOTOR_FAULT_CATCH_FAIL = 8         /**< Tailwind catch-spin failed after attempts.    */
 } motor_fault_t;
 
 /**
@@ -188,5 +190,11 @@ void MotorControl_ResetFastLoopProfile(void);
  * @return System tick counter.
  */
 uint32_t MotorControl_GetTickMs(void);
+
+/**
+ * @brief Get the rotor speed detected during the Wind Detect phase.
+ * @return Mechanical RPM measured before startup (positive = forward).
+ */
+float MotorControl_GetWindDetectSpeedRpm(void);
 
 #endif /* MOTOR_CONTROL_H */

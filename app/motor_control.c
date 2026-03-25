@@ -43,6 +43,17 @@ typedef struct {
   float targetRpmCommand;
   float targetIqCommandA;
   uint32_t tickMs;
+
+  /* Wind detect / catch spin */
+  float windDetectSpeedRadS;        /* Detected initial electrical speed */
+  float windDetectPrevSpeedRadS;    /* Previous speed for convergence check */
+  int8_t windDetectDirection;       /* Detected rotation direction +1/-1, 0=still */
+  uint32_t windDetectSettleCount;   /* Observer convergence counter */
+  bool windCatchActive;             /* Tailwind catch in progress */
+
+  /* Field weakening */
+  float fwIdTargetA;                /* Field weakening d-axis current command */
+  float voltageModulationRatio;     /* Latest |Vab|/Vbus from FOC output */
 } motor_control_ctx_t;
 
 static motor_control_ctx_t s_motorCtrl;
@@ -265,6 +276,13 @@ static void MotorControl_ResetRuntime(void) {
   s_motorCtrl.observerLockResidualRad = 0.0f;
   s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
   s_motorCtrl.openLoopSpeedRadS = 0.0f;
+  s_motorCtrl.windDetectSpeedRadS = 0.0f;
+  s_motorCtrl.windDetectPrevSpeedRadS = 0.0f;
+  s_motorCtrl.windDetectDirection = 0;
+  s_motorCtrl.windDetectSettleCount = 0U;
+  s_motorCtrl.windCatchActive = false;
+  s_motorCtrl.fwIdTargetA = 0.0f;
+  s_motorCtrl.voltageModulationRatio = 0.0f;
   MotorFoc_Reset(&s_motorCtrl.foc);
 }
 
@@ -374,8 +392,125 @@ static void MotorControl_StartClosedLoop(void) {
   s_motorCtrl.status.observer_locked = true;
   s_motorCtrl.status.target_rpm = observedMechanicalRpm;
   s_motorCtrl.foc.speed_pi_integrator_a = s_motorCtrl.status.iq_target_a;
+  s_motorCtrl.fwIdTargetA = 0.0f;
   MotorControl_SetState(MOTOR_STATE_CLOSED_LOOP);
 }
+
+/* ========================= Wind Detect / Catch Spin ======================== */
+#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+
+/**
+ * @brief Enter the Wind Detect state: observer runs on BEMF, PWM outputs masked.
+ */
+static void MotorControl_StartWindDetect(void) {
+  s_motorCtrl.windDetectSpeedRadS = 0.0f;
+  s_motorCtrl.windDetectPrevSpeedRadS = 0.0f;
+  s_motorCtrl.windDetectDirection = 0;
+  s_motorCtrl.windDetectSettleCount = 0U;
+  s_motorCtrl.windCatchActive = false;
+  s_motorCtrl.stateTimeMs = 0U;
+  s_motorCtrl.startupTimeMs = 0U;
+  s_motorCtrl.status.id_target_a = 0.0f;
+  s_motorCtrl.status.iq_target_a = 0.0f;
+  s_motorCtrl.status.observer_locked = false;
+  s_motorCtrl.fastLoopRunning = true;
+
+  /* Keep PWM outputs masked — only the observer is active (BEMF-driven). */
+  MotorHwYtm32_SetOutputsMasked(true);
+  MotorControl_SetState(MOTOR_STATE_WIND_DETECT);
+}
+
+/**
+ * @brief Tailwind catch: jump straight to closed-loop using observer angle.
+ */
+static void MotorControl_StartCatchSpin(void) {
+  const float observedMechanicalRpm =
+      __builtin_fabsf(MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(
+          s_motorCtrl.windDetectSpeedRadS));
+
+  s_motorCtrl.windCatchActive = true;
+  s_motorCtrl.closedLoopBlend = 1.0f;  /* fully trust observer immediately */
+  s_motorCtrl.observerLossCount = 0U;
+  s_motorCtrl.status.observer_locked = true;
+  s_motorCtrl.status.target_rpm = observedMechanicalRpm;
+  s_motorCtrl.targetRpmCommand = observedMechanicalRpm;
+  s_motorCtrl.status.id_target_a = 0.0f;
+  s_motorCtrl.status.iq_target_a = 0.0f;
+  s_motorCtrl.foc.speed_pi_integrator_a = 0.0f;
+  s_motorCtrl.fwIdTargetA = 0.0f;
+
+  /* Un-mask outputs to start driving */
+  MotorHwYtm32_SetOutputsMasked(false);
+  s_motorCtrl.outputsUnmasked = true;
+  MotorControl_SetState(MOTOR_STATE_CLOSED_LOOP);
+}
+
+/**
+ * @brief Periodic slow-loop handler for the Wind Detect state.
+ * Waits for observer PLL to converge, then decides the startup path.
+ */
+static void MotorControl_UpdateWindDetectState(void) {
+  const float currentSpeedRadS = s_motorCtrl.status.electrical_speed_rad_s;
+  const float speedDelta =
+      __builtin_fabsf(currentSpeedRadS - s_motorCtrl.windDetectPrevSpeedRadS);
+
+  s_motorCtrl.stateTimeMs++;
+  s_motorCtrl.startupTimeMs++;
+  s_motorCtrl.windDetectPrevSpeedRadS = currentSpeedRadS;
+
+  /* Check if observer speed has settled */
+  if (speedDelta < MOTOR_CFG_WIND_DETECT_SPEED_TOL_RAD_S) {
+    s_motorCtrl.windDetectSettleCount++;
+  } else {
+    s_motorCtrl.windDetectSettleCount = 0U;
+  }
+
+  /* Timeout protection */
+  if (s_motorCtrl.stateTimeMs >= MOTOR_CFG_WIND_DETECT_TIMEOUT_MS) {
+    /* Timed out waiting for convergence — assume standstill, go Align */
+    MotorControl_StartAlign();
+    return;
+  }
+
+  /* Wait until settled */
+  if (s_motorCtrl.windDetectSettleCount < MOTOR_CFG_WIND_DETECT_SETTLE_COUNT) {
+    return;
+  }
+
+  /* Observer has converged — record detected speed */
+  s_motorCtrl.windDetectSpeedRadS = currentSpeedRadS;
+
+  if (__builtin_fabsf(currentSpeedRadS) <
+      MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S) {
+    /* Rotor is essentially standstill — normal startup flow */
+    MotorControl_StartAlign();
+    return;
+  }
+
+  /* Determine detected direction */
+  s_motorCtrl.windDetectDirection = (currentSpeedRadS > 0.0f) ? 1 : -1;
+
+  if (s_motorCtrl.windDetectDirection == s_motorCtrl.status.direction) {
+    /* Tailwind: rotor spinning in the desired direction */
+    const float detectedRpm = __builtin_fabsf(
+        MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(currentSpeedRadS));
+
+    if (detectedRpm <= MOTOR_CFG_CATCH_MAX_SPEED_RPM) {
+      /* Speed within safe catch range — direct jump to closed-loop */
+      MotorControl_StartCatchSpin();
+    } else {
+      /* Speed too high — fall back to Align (motor will coast down) */
+      MotorControl_StartAlign();
+    }
+  } else {
+    /* Headwind: rotor spinning opposite to desired direction.
+     * Enter Align which will inject braking d-axis current and
+     * the open-loop ramp will overpower the reverse rotation. */
+    MotorControl_StartAlign();
+  }
+}
+
+#endif /* MOTOR_CFG_ENABLE_WIND_DETECT */
 
 /**
  * @brief Periodic slow-loop handler managing Open-Loop speed sweeps.
@@ -439,7 +574,7 @@ static void MotorControl_UpdateOpenLoopState(void) {
 
 /**
  * @brief Periodic slow-loop handler active during Closed-Loop control.
- * Calculates PI speed requests. Called at 1 kHz.
+ * Calculates PI speed requests and field weakening. Called at 1 kHz.
  */
 static void MotorControl_UpdateClosedLoopState(void) {
   const float blendStep = (MOTOR_CFG_CLOSED_LOOP_BLEND_MS > 0U)
@@ -453,7 +588,30 @@ static void MotorControl_UpdateClosedLoopState(void) {
         MotorControl_Clamp(s_motorCtrl.closedLoopBlend + blendStep, 0.0f, 1.0f);
   }
 
+  /* ---- Field Weakening Controller ---- */
+#if (MOTOR_CFG_ENABLE_FIELD_WEAKENING != 0U)
+  {
+    const float fwError =
+        s_motorCtrl.voltageModulationRatio - MOTOR_CFG_FW_VOLTAGE_THRESHOLD;
+
+    if (fwError > 0.0f) {
+      /* Voltage saturating — inject more negative Id */
+      s_motorCtrl.fwIdTargetA -=
+          MOTOR_CFG_FW_KI * MOTOR_CFG_SPEED_LOOP_DT_S * fwError;
+      s_motorCtrl.fwIdTargetA = MotorControl_Clamp(
+          s_motorCtrl.fwIdTargetA, MOTOR_CFG_FW_MAX_NEGATIVE_ID_A, 0.0f);
+    } else {
+      /* Voltage margin available — slowly recover Id back to zero */
+      s_motorCtrl.fwIdTargetA = MotorControl_SlewTowards(
+          s_motorCtrl.fwIdTargetA, 0.0f,
+          MOTOR_CFG_FW_RECOVERY_RATE * MOTOR_CFG_SPEED_LOOP_DT_S);
+    }
+    s_motorCtrl.status.id_target_a = s_motorCtrl.fwIdTargetA;
+  }
+#else
   s_motorCtrl.status.id_target_a = 0.0f;
+#endif
+
   if (s_motorCtrl.controlModeRequest == MOTOR_CONTROL_MODE_CURRENT) {
     s_motorCtrl.status.iq_target_a = s_motorCtrl.targetIqCommandA;
   } else {
@@ -503,6 +661,12 @@ static void MotorControl_HandleSlowLoop(void) {
 
   case MOTOR_STATE_OFFSET_CAL:
     break;
+
+#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+  case MOTOR_STATE_WIND_DETECT:
+    MotorControl_UpdateWindDetectState();
+    break;
+#endif
 
   case MOTOR_STATE_ALIGN:
     s_motorCtrl.stateTimeMs++;
@@ -652,6 +816,10 @@ void MotorControl_ResetFastLoopProfile(void) {
 
 uint32_t MotorControl_GetTickMs(void) { return s_motorCtrl.tickMs; }
 
+float MotorControl_GetWindDetectSpeedRpm(void) {
+  return MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(s_motorCtrl.windDetectSpeedRadS);
+}
+
 void MotorControl_ProfileRecordFocTiming(uint32_t focTotalCycles,
                                          uint32_t observerCycles,
                                          uint32_t currentLoopCycles,
@@ -720,7 +888,11 @@ void ADC0_IRQHandler(void) {
           s_motorCtrl.currentOffsetBSum / sampleCount;
       s_motorCtrl.currentOffsetCRaw =
           s_motorCtrl.currentOffsetCSum / sampleCount;
+#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+      MotorControl_StartWindDetect();
+#else
       MotorControl_StartAlign();
+#endif
     }
     goto irq_exit;
   }
@@ -753,7 +925,15 @@ void ADC0_IRQHandler(void) {
   /* Determine control angle based on motor state */
   if (s_motorCtrl.status.state == MOTOR_STATE_ALIGN) {
     focInput.control_angle_rad = MotorControl_GetAlignAngle();
-  } else {
+  }
+#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+  else if (s_motorCtrl.status.state == MOTOR_STATE_WIND_DETECT) {
+    /* During wind detect, use observer angle as control angle.
+     * PWM outputs are masked so no current flows — observer runs on BEMF. */
+    focInput.control_angle_rad = s_motorCtrl.latestObserverAngleRad;
+  }
+#endif
+  else {
     s_motorCtrl.openLoopAngleRad = MotorFoc_WrapAngle0ToTwoPi(
         s_motorCtrl.openLoopAngleRad +
         (s_motorCtrl.openLoopSpeedRadS * MOTOR_CFG_FAST_LOOP_DT_S));
@@ -777,7 +957,11 @@ void ADC0_IRQHandler(void) {
   focInput.id_target_a = s_motorCtrl.status.id_target_a;
   focInput.iq_target_a = s_motorCtrl.status.iq_target_a;
   focInput.deadtime_comp_enable =
-      (s_motorCtrl.status.state != MOTOR_STATE_ALIGN);
+      (s_motorCtrl.status.state != MOTOR_STATE_ALIGN)
+#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+      && (s_motorCtrl.status.state != MOTOR_STATE_WIND_DETECT)
+#endif
+      ;
 
   MotorFoc_RunFast(&s_motorCtrl.foc, &focInput, &focOutput);
 
@@ -786,12 +970,18 @@ void ADC0_IRQHandler(void) {
   s_motorCtrl.status.iq_a = focOutput.iq_a;
   s_motorCtrl.latestPhaseErrorRad = focOutput.phase_error_rad;
   s_motorCtrl.latestObserverAngleRad = focOutput.observer_angle_rad;
+  s_motorCtrl.voltageModulationRatio = focOutput.voltage_modulation_ratio;
   s_motorCtrl.status.electrical_angle_rad =
       (s_motorCtrl.status.state == MOTOR_STATE_CLOSED_LOOP)
           ? focOutput.observer_angle_rad
           : focInput.control_angle_rad;
 
-  if (!s_motorCtrl.outputsUnmasked) {
+  /* Un-mask outputs if not yet done (skip during wind detect — outputs stay masked) */
+  if (!s_motorCtrl.outputsUnmasked
+#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+      && (s_motorCtrl.status.state != MOTOR_STATE_WIND_DETECT)
+#endif
+  ) {
     MotorHwYtm32_SetOutputsMasked(false);
     s_motorCtrl.outputsUnmasked = true;
   }

@@ -290,6 +290,22 @@ static void CanConfig_SendStatus2(void)
     /* Bytes 34-35: ChipTemperature, scale=0.1 */
     pack_s16(s_txBuf, 34, (int16_t)(s_temperature.chip_temperature_degc / 0.1f));
 
+    /* ── BEMF wind detection diagnostics (bytes 36-48) ── */
+    /* Bytes 36-37: BemfU raw ADC, scale=1 */
+    pack_u16(s_txBuf, 36, diag.bemf_u_raw);
+    /* Bytes 38-39: BemfV raw ADC, scale=1 */
+    pack_u16(s_txBuf, 38, diag.bemf_v_raw);
+    /* Bytes 40-41: BemfW raw ADC, scale=1 */
+    pack_u16(s_txBuf, 40, diag.bemf_w_raw);
+    /* Bytes 42-43: BemfCom raw ADC, scale=1 */
+    pack_u16(s_txBuf, 42, diag.bemf_com_raw);
+    /* Bytes 44-45: BemfCrossingCount, scale=1 */
+    pack_u16(s_txBuf, 44, diag.bemf_crossing_count);
+    /* Bytes 46-47: BemfDetectedRpm, scale=1 (signed) */
+    pack_s16(s_txBuf, 46, diag.bemf_detected_rpm);
+    /* Byte 48: BemfPhaseSeq, scale=1 (signed) */
+    pack_s8(s_txBuf, 48, diag.bemf_phase_sequence);
+
     static const flexcan_data_info_t txInfo = {
         .msg_id_type = FLEXCAN_MSG_ID_STD,
         .data_length = CAN_MSG_DLC,

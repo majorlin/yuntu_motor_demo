@@ -457,3 +457,48 @@ void MotorHwYtm32_ApplyPhaseDuty(float dutyU, float dutyV, float dutyW)
 
     (void)eTMR_DRV_SetLdok(MOTOR_HW_ETMR_INSTANCE);
 }
+
+/* ======================== BEMF Voltage Sensing ========================== */
+
+#include "adc_hw_access.h"  /* For ADC_SetSequeceChannel / SetSequeceTotalChannel */
+
+void MotorHwYtm32_SwitchAdcToBemfSensing(void)
+{
+    /* Reconfigure ADC sequence channels directly via registers.
+     * The user confirmed this is safe between EOSEQ and next trigger. */
+    ADC_SetSequeceChannel(s_motorHwAdcBase, 0U,
+                          (adc_inputchannel_t)MOTOR_HW_ADC_BEMF_U_CH);
+    ADC_SetSequeceChannel(s_motorHwAdcBase, 1U,
+                          (adc_inputchannel_t)MOTOR_HW_ADC_BEMF_V_CH);
+    ADC_SetSequeceChannel(s_motorHwAdcBase, 2U,
+                          (adc_inputchannel_t)MOTOR_HW_ADC_BEMF_W_CH);
+    ADC_SetSequeceChannel(s_motorHwAdcBase, 3U,
+                          (adc_inputchannel_t)MOTOR_HW_ADC_BEMF_COM_CH);
+    ADC_SetSequeceTotalChannel(s_motorHwAdcBase, 4U);
+}
+
+void MotorHwYtm32_SwitchAdcToCurrentSensing(void)
+{
+    /* Restore original current sensing + Vbus sequence. */
+    ADC_SetSequeceChannel(s_motorHwAdcBase, 0U,
+                          (adc_inputchannel_t)MOTOR_HW_ADC_CURRENT_A_CH);
+    ADC_SetSequeceChannel(s_motorHwAdcBase, 1U,
+                          (adc_inputchannel_t)MOTOR_HW_ADC_CURRENT_B_CH);
+    ADC_SetSequeceChannel(s_motorHwAdcBase, 2U,
+                          (adc_inputchannel_t)MOTOR_HW_ADC_CURRENT_C_CH);
+    ADC_SetSequeceChannel(s_motorHwAdcBase, 3U,
+                          (adc_inputchannel_t)MOTOR_HW_ADC_VBUS_CH);
+    ADC_SetSequeceTotalChannel(s_motorHwAdcBase, 4U);
+}
+
+bool MotorHwYtm32_ReadBemfFrame(motor_bemf_raw_frame_t *frame)
+{
+    frame->bemf_u_raw   = (uint16_t)s_motorHwAdcBase->FIFO;
+    frame->bemf_v_raw   = (uint16_t)s_motorHwAdcBase->FIFO;
+    frame->bemf_w_raw   = (uint16_t)s_motorHwAdcBase->FIFO;
+    frame->bemf_com_raw = (uint16_t)s_motorHwAdcBase->FIFO;
+    MotorHwYtm32_ClearAdcFlags(ADC_STS_EOC_MASK | ADC_STS_EOSEQ_MASK |
+                               ADC_STS_OVR_MASK);
+    return true;
+}
+

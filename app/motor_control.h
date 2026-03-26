@@ -225,6 +225,14 @@ typedef struct {
     float duty_u;                    /**< Phase U PWM duty [0..1].               */
     float duty_v;                    /**< Phase V PWM duty [0..1].               */
     float duty_w;                    /**< Phase W PWM duty [0..1].               */
+    /* BEMF wind detection diagnostics */
+    uint16_t bemf_u_raw;             /**< BEMF phase U raw ADC count.            */
+    uint16_t bemf_v_raw;             /**< BEMF phase V raw ADC count.            */
+    uint16_t bemf_w_raw;             /**< BEMF phase W raw ADC count.            */
+    uint16_t bemf_com_raw;           /**< BEMF neutral raw ADC count.            */
+    uint16_t bemf_crossing_count;    /**< Total zero crossings detected.         */
+    int16_t  bemf_detected_rpm;      /**< Estimated mechanical RPM from BEMF.    */
+    int8_t   bemf_phase_sequence;    /**< Phase sequence: +1=fwd, -1=rev, 0=unk. */
 } motor_foc_diagnostics_t;
 
 /**

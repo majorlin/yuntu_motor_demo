@@ -45,20 +45,34 @@ typedef struct {
   uint32_t tickMs;
 
   /* Wind detect / catch spin */
-  float windDetectSpeedRadS;        /* Detected initial electrical speed */
-  float windDetectPrevSpeedRadS;    /* Previous speed for convergence check */
-  int8_t windDetectDirection;       /* Detected rotation direction +1/-1, 0=still */
-  uint32_t windDetectSettleCount;   /* Observer convergence counter */
-  bool windCatchActive;             /* Tailwind catch in progress */
+  float windDetectSpeedRadS;     /* Detected initial electrical speed */
+  float windDetectPrevSpeedRadS; /* Previous speed for convergence check */
+  int8_t windDetectDirection; /* Detected rotation direction +1/-1, 0=still */
+  uint32_t windDetectSettleCount; /* Observer convergence counter */
+  bool windCatchActive;           /* Tailwind catch in progress */
+
+  /* BEMF voltage zero-crossing detection (for passive wind detect) */
+  int8_t   bemfSignPrev[3];       /* Previous sign of each BEMF phase (-1/0/+1) */
+  uint32_t bemfZeroCrossingCount; /* Total zero crossings detected */
+  uint32_t bemfFirstCrossingTick; /* ISR tick of the first zero crossing */
+  uint32_t bemfLastCrossingTick;  /* ISR tick of the most recent crossing */
+  uint32_t bemfIsrTickCounter;    /* Running ISR tick counter during wind detect */
+  int8_t   bemfPhaseSequence;     /* +1 = forward, -1 = reverse, 0 = unknown */
+
+  /* Last BEMF raw values (cached from ISR for telemetry) */
+  uint16_t bemfLastU;
+  uint16_t bemfLastV;
+  uint16_t bemfLastW;
+  uint16_t bemfLastCom;
 
   /* Field weakening */
-  float fwIdTargetA;                /* Field weakening d-axis current command */
-  float voltageModulationRatio;     /* Latest |Vab|/Vbus from FOC output */
+  float fwIdTargetA;            /* Field weakening d-axis current command */
+  float voltageModulationRatio; /* Latest |Vab|/Vbus from FOC output */
 
   /* Startup retry / stall detection */
-  uint8_t  startupRetryCount;       /* Current retry attempt number */
-  float    startupIqBoostA;         /* Accumulated Iq boost for retries (A) */
-  uint32_t stallAngleDivCount;      /* Consecutive angle-divergence counter */
+  uint8_t startupRetryCount;   /* Current retry attempt number */
+  float startupIqBoostA;       /* Accumulated Iq boost for retries (A) */
+  uint32_t stallAngleDivCount; /* Consecutive angle-divergence counter */
 } motor_control_ctx_t;
 
 static motor_control_ctx_t s_motorCtrl;
@@ -408,7 +422,8 @@ static void MotorControl_StartOpenLoop(void) {
 }
 
 /**
- * @brief Transition step from Open-Loop spinning to Sensorless Closed-Loop control.
+ * @brief Transition step from Open-Loop spinning to Sensorless Closed-Loop
+ * control.
  */
 static void MotorControl_StartClosedLoop(void) {
   const float observedMechanicalRpm =
@@ -424,9 +439,8 @@ static void MotorControl_StartClosedLoop(void) {
    * severe speed overshoot and oscillation on the first closed-loop cycles.
    * Limit to half the open-loop current so the PI can ramp smoothly. */
   s_motorCtrl.foc.speed_pi_integrator_a = MotorControl_Clamp(
-      s_motorCtrl.status.iq_target_a,
-      -MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f,
-       MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f);
+      s_motorCtrl.status.iq_target_a, -MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f,
+      MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f);
   s_motorCtrl.fwIdTargetA = 0.0f;
   MotorControl_SetState(MOTOR_STATE_CLOSED_LOOP);
 }
@@ -466,14 +480,16 @@ static void MotorControl_HandleStartupFailure(void) {
   MotorControl_StartAlign();
 }
 
-/* ========================= Wind Detect / Catch Spin ======================== */
+/* ========================= Wind Detect / Catch Spin ========================
+ */
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
 
 /* Forward declaration — defined after UpdateWindDetectState which calls it. */
 static void MotorControl_StartCoastDown(void);
 
 /**
- * @brief Enter the Wind Detect state: observer runs on BEMF, PWM outputs masked.
+ * @brief Enter the Wind Detect state: observer runs on BEMF, PWM outputs
+ * masked.
  */
 static void MotorControl_StartWindDetect(void) {
   s_motorCtrl.windDetectSpeedRadS = 0.0f;
@@ -488,8 +504,20 @@ static void MotorControl_StartWindDetect(void) {
   s_motorCtrl.status.observer_locked = false;
   s_motorCtrl.fastLoopRunning = true;
 
-  /* Keep PWM outputs masked — only the observer is active (BEMF-driven). */
+  /* BEMF zero-crossing detection state */
+  s_motorCtrl.bemfSignPrev[0] = 0;
+  s_motorCtrl.bemfSignPrev[1] = 0;
+  s_motorCtrl.bemfSignPrev[2] = 0;
+  s_motorCtrl.bemfZeroCrossingCount = 0U;
+  s_motorCtrl.bemfFirstCrossingTick = 0U;
+  s_motorCtrl.bemfLastCrossingTick = 0U;
+  s_motorCtrl.bemfIsrTickCounter = 0U;
+  s_motorCtrl.bemfPhaseSequence = 0;
+
+  /* Keep all MOSFETs OFF — zero braking torque.
+   * Switch ADC sequence from current sensing to BEMF phase voltage channels. */
   MotorHwYtm32_SetOutputsMasked(true);
+  MotorHwYtm32_SwitchAdcToBemfSensing();
   MotorControl_SetState(MOTOR_STATE_WIND_DETECT);
 }
 
@@ -497,12 +525,11 @@ static void MotorControl_StartWindDetect(void) {
  * @brief Tailwind catch: jump straight to closed-loop using observer angle.
  */
 static void MotorControl_StartCatchSpin(void) {
-  const float observedMechanicalRpm =
-      __builtin_fabsf(MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(
-          s_motorCtrl.windDetectSpeedRadS));
+  const float observedMechanicalRpm = __builtin_fabsf(
+      MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(s_motorCtrl.windDetectSpeedRadS));
 
   s_motorCtrl.windCatchActive = true;
-  s_motorCtrl.closedLoopBlend = 1.0f;  /* fully trust observer immediately */
+  s_motorCtrl.closedLoopBlend = 1.0f; /* fully trust observer immediately */
   s_motorCtrl.observerLossCount = 0U;
   s_motorCtrl.status.observer_locked = true;
   s_motorCtrl.status.target_rpm = observedMechanicalRpm;
@@ -523,71 +550,68 @@ static void MotorControl_StartCatchSpin(void) {
  * Waits for observer PLL to converge, then decides the startup path.
  */
 static void MotorControl_UpdateWindDetectState(void) {
-  const float currentSpeedRadS = s_motorCtrl.status.electrical_speed_rad_s;
-  const float speedDelta =
-      __builtin_fabsf(currentSpeedRadS - s_motorCtrl.windDetectPrevSpeedRadS);
-
   s_motorCtrl.stateTimeMs++;
   s_motorCtrl.startupTimeMs++;
-  s_motorCtrl.windDetectPrevSpeedRadS = currentSpeedRadS;
 
-  /* Check if observer speed has settled */
-  if (speedDelta < MOTOR_CFG_WIND_DETECT_SPEED_TOL_RAD_S) {
-    s_motorCtrl.windDetectSettleCount++;
-  } else {
-    s_motorCtrl.windDetectSettleCount = 0U;
-  }
-
-  /* Timeout protection */
+  /* Timeout protection — assume standstill if no valid reading in time */
   if (s_motorCtrl.stateTimeMs >= MOTOR_CFG_WIND_DETECT_TIMEOUT_MS) {
-    /* Timed out waiting for convergence — assume standstill, go Align */
+    MotorHwYtm32_SwitchAdcToCurrentSensing();
     MotorControl_StartAlign();
     return;
   }
 
-  /* Wait until settled */
-  if (s_motorCtrl.windDetectSettleCount < MOTOR_CFG_WIND_DETECT_SETTLE_COUNT) {
+  /* Need enough zero crossings for a reliable speed estimate. */
+  if (s_motorCtrl.bemfZeroCrossingCount < MOTOR_CFG_WIND_DETECT_MIN_CROSSINGS) {
     return;
   }
 
-  /* Observer has converged — record detected speed */
-  s_motorCtrl.windDetectSpeedRadS = currentSpeedRadS;
+  /* Compute speed from BEMF zero-crossing rate.
+   * Each phase has 2 crossings per electrical cycle (rising + falling).
+   * Total crossings across 3 phases = 6 per electrical cycle.
+   * electrical_freq = crossings / 6 / time_window_s
+   * electrical_speed_rad_s = electrical_freq * 2π */
+  const uint32_t tickSpan =
+      s_motorCtrl.bemfLastCrossingTick - s_motorCtrl.bemfFirstCrossingTick;
+  if (tickSpan == 0U) {
+    return; /* Division by zero guard */
+  }
 
-  /* Flux magnitude validation: if the observer's estimated flux linkage is
-   * below the minimum threshold, the BEMF is too weak to trust the speed
-   * estimate. This filters out false CatchSpin triggers caused by ADC noise
-   * when the motor is actually stationary with near-zero BEMF. */
-  const float observerFluxVs = s_motorCtrl.foc.observer_lambda_vs;
-  const bool fluxTooLow =
-      (observerFluxVs < MOTOR_CFG_WIND_DETECT_MIN_FLUX_VS);
+  const float timeWindowS =
+      (float)tickSpan * MOTOR_CFG_FAST_LOOP_DT_S;
+  const float crossingsPerSec =
+      (float)(s_motorCtrl.bemfZeroCrossingCount - 1U) / timeWindowS;
+  /* 6 crossings per electrical cycle (3 phases × 2 edges) */
+  const float elecFreqHz = crossingsPerSec / 6.0f;
+  const float elecSpeedRadS = elecFreqHz * 6.2831853f; /* × 2π */
+  const float mechRpm =
+      __builtin_fabsf(MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(elecSpeedRadS));
 
-  if (fluxTooLow ||
-      (__builtin_fabsf(currentSpeedRadS) <
-       MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S)) {
-    /* Rotor is essentially standstill or flux too weak to trust — normal
-     * startup flow */
+  /* Store detected speed for telemetry */
+  s_motorCtrl.windDetectSpeedRadS = elecSpeedRadS;
+  s_motorCtrl.status.electrical_speed_rad_s = elecSpeedRadS;
+
+  /* Below standstill threshold — normal startup */
+  if (mechRpm < MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM) {
+    MotorHwYtm32_SwitchAdcToCurrentSensing();
     MotorControl_StartAlign();
     return;
   }
 
-  /* Determine detected direction */
-  s_motorCtrl.windDetectDirection = (currentSpeedRadS > 0.0f) ? 1 : -1;
+  /* Determine detected direction from BEMF phase sequence. */
+  s_motorCtrl.windDetectDirection = (s_motorCtrl.bemfPhaseSequence >= 0) ? 1 : -1;
+
+  /* Always restore ADC to current sensing before leaving wind detect */
+  MotorHwYtm32_SwitchAdcToCurrentSensing();
 
   if (s_motorCtrl.windDetectDirection == s_motorCtrl.status.direction) {
     /* Tailwind: rotor spinning in the desired direction */
-    const float detectedRpm = __builtin_fabsf(
-        MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(currentSpeedRadS));
-
-    if (detectedRpm <= MOTOR_CFG_CATCH_MAX_SPEED_RPM) {
-      /* Speed within safe catch range — direct jump to closed-loop */
+    if (mechRpm <= MOTOR_CFG_CATCH_MAX_SPEED_RPM) {
       MotorControl_StartCatchSpin();
     } else {
-      /* Speed too high — coast down with outputs off, wait for safe speed */
       MotorControl_StartCoastDown();
     }
   } else {
-    /* Headwind: rotor spinning opposite to desired direction.
-     * No braking resistor — coast down with outputs off. */
+    /* Headwind — coast down with outputs off */
     MotorControl_StartCoastDown();
   }
 }
@@ -630,10 +654,11 @@ static void MotorControl_UpdateCoastDownState(void) {
    * brakeGain = 1.0 when Vbus <= LIMIT          (full braking)
    * brakeGain = 0.0 when Vbus >= LIMIT + HYST   (no braking, coast)
    * Linear interpolation in between. */
-  float brakeGain = MotorControl_Clamp(
-      (MOTOR_CFG_COAST_BRAKE_VBUS_LIMIT_V + MOTOR_CFG_COAST_BRAKE_VBUS_HYST_V
-       - vbus) / MOTOR_CFG_COAST_BRAKE_VBUS_HYST_V,
-      0.0f, 1.0f);
+  float brakeGain =
+      MotorControl_Clamp((MOTOR_CFG_COAST_BRAKE_VBUS_LIMIT_V +
+                          MOTOR_CFG_COAST_BRAKE_VBUS_HYST_V - vbus) /
+                             MOTOR_CFG_COAST_BRAKE_VBUS_HYST_V,
+                         0.0f, 1.0f);
 
   s_motorCtrl.status.id_target_a = 0.0f;
   s_motorCtrl.status.iq_target_a =
@@ -670,8 +695,8 @@ static void MotorControl_UpdateOpenLoopState(void) {
   const float openLoopIqFinalA =
       MOTOR_CFG_OPEN_LOOP_IQ_A + s_motorCtrl.startupIqBoostA;
   const float iqStepA =
-      (__builtin_fabsf(openLoopIqFinalA -
-                       (MOTOR_CFG_ALIGN_CURRENT_A + s_motorCtrl.startupIqBoostA)) *
+      (__builtin_fabsf(openLoopIqFinalA - (MOTOR_CFG_ALIGN_CURRENT_A +
+                                           s_motorCtrl.startupIqBoostA)) *
        MOTOR_CFG_SPEED_LOOP_DT_S) /
       openLoopRampTimeS;
   const float phaseTrackBlend = MotorControl_Clamp(
@@ -805,7 +830,8 @@ static void MotorControl_UpdateClosedLoopState(void) {
 }
 
 /**
- * @brief Main periodic slow loop managing state machine dispatch and user ramping.
+ * @brief Main periodic slow loop managing state machine dispatch and user
+ * ramping.
  */
 static void MotorControl_HandleSlowLoop(void) {
   const float speedRampStepRpm =
@@ -1079,6 +1105,69 @@ void ADC0_IRQHandler(void) {
     goto irq_exit;
   }
 
+#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+  /* ---- BEMF voltage wind detection (all MOSFET off, no FOC) ----------- */
+  if (s_motorCtrl.status.state == MOTOR_STATE_WIND_DETECT) {
+    motor_bemf_raw_frame_t bemf;
+    MotorHwYtm32_ReadBemfFrame(&bemf);
+    s_motorCtrl.bemfIsrTickCounter++;
+
+    /* Compute BEMF relative to hardware neutral point.
+     * All values are 12-bit unsigned ADC counts; subtraction gives a signed
+     * result centred around zero. */
+    const int16_t bemfU = (int16_t)bemf.bemf_u_raw - (int16_t)bemf.bemf_com_raw;
+    const int16_t bemfV = (int16_t)bemf.bemf_v_raw - (int16_t)bemf.bemf_com_raw;
+    const int16_t bemfW = (int16_t)bemf.bemf_w_raw - (int16_t)bemf.bemf_com_raw;
+
+    /* Compute current sign for each phase (-1, 0, +1). */
+    const int8_t signU = (bemfU > 30) ? 1 : ((bemfU < -30) ? -1 : 0);
+    const int8_t signV = (bemfV > 30) ? 1 : ((bemfV < -30) ? -1 : 0);
+    const int8_t signW = (bemfW > 30) ? 1 : ((bemfW < -30) ? -1 : 0);
+    const int8_t signs[3] = { signU, signV, signW };
+
+    /* Detect zero crossings on each phase. */
+    for (uint8_t ph = 0U; ph < 3U; ph++) {
+      if (signs[ph] != 0 && s_motorCtrl.bemfSignPrev[ph] != 0 &&
+          signs[ph] != s_motorCtrl.bemfSignPrev[ph]) {
+        /* Zero crossing detected on this phase. */
+        if (s_motorCtrl.bemfZeroCrossingCount == 0U) {
+          s_motorCtrl.bemfFirstCrossingTick = s_motorCtrl.bemfIsrTickCounter;
+        }
+        s_motorCtrl.bemfLastCrossingTick = s_motorCtrl.bemfIsrTickCounter;
+        s_motorCtrl.bemfZeroCrossingCount++;
+
+        /* Determine phase sequence from which phase crosses after which.
+         * If U rises then V rises next → forward (+1).
+         * If U rises then W rises next → reverse (-1). */
+        if (signs[ph] > 0) { /* Rising edge */
+          if (ph == 0U)
+            s_motorCtrl.bemfPhaseSequence = 1;  /* U rise → expect V next */
+          else if (ph == 1U && s_motorCtrl.bemfPhaseSequence == 1)
+            s_motorCtrl.bemfPhaseSequence = 1;  /* Confirmed forward */
+          else if (ph == 2U && s_motorCtrl.bemfPhaseSequence == 1)
+            s_motorCtrl.bemfPhaseSequence = -1; /* W rose before V → reverse */
+        }
+      }
+      if (signs[ph] != 0) {
+        s_motorCtrl.bemfSignPrev[ph] = signs[ph];
+      }
+    }
+
+    /* Cache raw BEMF values for CAN telemetry */
+    s_motorCtrl.bemfLastU   = bemf.bemf_u_raw;
+    s_motorCtrl.bemfLastV   = bemf.bemf_v_raw;
+    s_motorCtrl.bemfLastW   = bemf.bemf_w_raw;
+    s_motorCtrl.bemfLastCom = bemf.bemf_com_raw;
+
+    /* Store avg BEMF amplitude in observer_flux_vs for debugging. */
+    s_motorCtrl.foc.observer_lambda_vs =
+        (float)(__builtin_abs(bemfU) + __builtin_abs(bemfV) +
+                __builtin_abs(bemfW)) / 3.0f;
+
+    goto irq_exit;
+  }
+#endif
+
   if (__builtin_fabsf(s_motorCtrl.status.phase_current_a) >
           MOTOR_CFG_PHASE_OVERCURRENT_A ||
       __builtin_fabsf(s_motorCtrl.status.phase_current_b) >
@@ -1104,11 +1193,8 @@ void ADC0_IRQHandler(void) {
     focInput.control_angle_rad = MotorControl_GetAlignAngle();
   }
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
-  else if (s_motorCtrl.status.state == MOTOR_STATE_WIND_DETECT) {
-    /* During wind detect, use observer angle as control angle.
-     * PWM outputs are masked so no current flows — observer runs on BEMF. */
-    focInput.control_angle_rad = s_motorCtrl.latestObserverAngleRad;
-  } else if (s_motorCtrl.status.state == MOTOR_STATE_COAST_DOWN) {
+  /* WIND_DETECT is handled above (BEMF branch) and never reaches here. */
+  else if (s_motorCtrl.status.state == MOTOR_STATE_COAST_DOWN) {
     /* Coast-down: observer angle drives Park transform for regen braking. */
     focInput.control_angle_rad = s_motorCtrl.latestObserverAngleRad;
   }
@@ -1137,12 +1223,7 @@ void ADC0_IRQHandler(void) {
   focInput.id_target_a = s_motorCtrl.status.id_target_a;
   focInput.iq_target_a = s_motorCtrl.status.iq_target_a;
   focInput.deadtime_comp_enable =
-      (s_motorCtrl.status.state != MOTOR_STATE_ALIGN)
-#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
-      && (s_motorCtrl.status.state != MOTOR_STATE_WIND_DETECT)
-      /* Coast-Down uses active braking — deadtime comp enabled */
-#endif
-      ;
+      (s_motorCtrl.status.state != MOTOR_STATE_ALIGN);
 
   MotorFoc_RunFast(&s_motorCtrl.foc, &focInput, &focOutput);
 
@@ -1157,13 +1238,10 @@ void ADC0_IRQHandler(void) {
           ? focOutput.observer_angle_rad
           : focInput.control_angle_rad;
 
-  /* Un-mask outputs if not yet done (skip during wind detect — outputs stay masked) */
-  if (!s_motorCtrl.outputsUnmasked
-#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
-      && (s_motorCtrl.status.state != MOTOR_STATE_WIND_DETECT)
-      /* Coast-Down already un-masks in StartCoastDown for active braking */
-#endif
-  ) {
+  /* Un-mask outputs if not yet done.
+   * Wind detect exits via BEMF branch (never reaches here).
+   * Coast-Down already un-masks in StartCoastDown. */
+  if (!s_motorCtrl.outputsUnmasked) {
     MotorHwYtm32_SetOutputsMasked(false);
     s_motorCtrl.outputsUnmasked = true;
   }
@@ -1206,21 +1284,21 @@ void MotorControl_GetFocDiagnostics(motor_foc_diagnostics_t *diag) {
     return;
   }
 
-  diag->observer_angle_rad       = s_motorCtrl.foc.pll_phase_rad;
-  diag->observer_flux_vs         = s_motorCtrl.foc.observer_lambda_vs;
-  diag->pll_speed_rad_s          = s_motorCtrl.foc.pll_speed_rad_s;
-  diag->phase_error_rad          = s_motorCtrl.latestPhaseErrorRad;
-  diag->speed_pi_integrator_a    = s_motorCtrl.foc.speed_pi_integrator_a;
-  diag->id_pi_integrator_v       = s_motorCtrl.foc.current_pi_d_integrator_v;
-  diag->iq_pi_integrator_v       = s_motorCtrl.foc.current_pi_q_integrator_v;
+  diag->observer_angle_rad = s_motorCtrl.foc.pll_phase_rad;
+  diag->observer_flux_vs = s_motorCtrl.foc.observer_lambda_vs;
+  diag->pll_speed_rad_s = s_motorCtrl.foc.pll_speed_rad_s;
+  diag->phase_error_rad = s_motorCtrl.latestPhaseErrorRad;
+  diag->speed_pi_integrator_a = s_motorCtrl.foc.speed_pi_integrator_a;
+  diag->id_pi_integrator_v = s_motorCtrl.foc.current_pi_d_integrator_v;
+  diag->iq_pi_integrator_v = s_motorCtrl.foc.current_pi_q_integrator_v;
   diag->voltage_modulation_ratio = s_motorCtrl.voltageModulationRatio;
-  diag->fw_id_target_a           = s_motorCtrl.fwIdTargetA;
-  diag->open_loop_angle_rad      = s_motorCtrl.openLoopAngleRad;
-  diag->open_loop_speed_rad_s    = s_motorCtrl.openLoopSpeedRadS;
-  diag->closed_loop_blend        = s_motorCtrl.closedLoopBlend;
-  diag->state_time_ms            = s_motorCtrl.stateTimeMs;
-  diag->obs_lock_residual_rad    = s_motorCtrl.observerLockResidualRad;
-  diag->stall_div_count          = (uint16_t)s_motorCtrl.stallAngleDivCount;
+  diag->fw_id_target_a = s_motorCtrl.fwIdTargetA;
+  diag->open_loop_angle_rad = s_motorCtrl.openLoopAngleRad;
+  diag->open_loop_speed_rad_s = s_motorCtrl.openLoopSpeedRadS;
+  diag->closed_loop_blend = s_motorCtrl.closedLoopBlend;
+  diag->state_time_ms = s_motorCtrl.stateTimeMs;
+  diag->obs_lock_residual_rad = s_motorCtrl.observerLockResidualRad;
+  diag->stall_div_count = (uint16_t)s_motorCtrl.stallAngleDivCount;
 
   /* Duty cycles: not cached in s_motorCtrl — report 0 unless extended.
    * The FOC output is local to the ADC ISR. For duty telemetry, the
@@ -1229,4 +1307,16 @@ void MotorControl_GetFocDiagnostics(motor_foc_diagnostics_t *diag) {
   diag->duty_u = 0.0f;
   diag->duty_v = 0.0f;
   diag->duty_w = 0.0f;
+
+  /* BEMF wind detection diagnostics — only meaningful in WIND_DETECT state */
+  diag->bemf_crossing_count =
+      (uint16_t)s_motorCtrl.bemfZeroCrossingCount;
+  diag->bemf_detected_rpm =
+      (int16_t)MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(
+          s_motorCtrl.windDetectSpeedRadS);
+  diag->bemf_phase_sequence = s_motorCtrl.bemfPhaseSequence;
+  diag->bemf_u_raw   = s_motorCtrl.bemfLastU;
+  diag->bemf_v_raw   = s_motorCtrl.bemfLastV;
+  diag->bemf_w_raw   = s_motorCtrl.bemfLastW;
+  diag->bemf_com_raw = s_motorCtrl.bemfLastCom;
 }

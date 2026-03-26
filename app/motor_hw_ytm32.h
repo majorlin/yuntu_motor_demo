@@ -109,4 +109,39 @@ static inline void MotorHwYtm32_SetAdcIrqDebugPinLow(void)
     MOTOR_HW_ADC_IRQ_DEBUG_GPIO->PCOR = MOTOR_HW_ADC_IRQ_DEBUG_PIN_MASK;
 }
 
+/**
+ * @brief Hardware-independent BEMF voltage raw reading frame.
+ *
+ * Used during WIND_DETECT to sample phase voltages through the
+ * 1/5 resistor divider network with all MOSFETs off.
+ */
+typedef struct
+{
+    uint16_t bemf_u_raw;   /**< BEMF phase U raw 12-bit ADC count. */
+    uint16_t bemf_v_raw;   /**< BEMF phase V raw 12-bit ADC count. */
+    uint16_t bemf_w_raw;   /**< BEMF phase W raw 12-bit ADC count. */
+    uint16_t bemf_com_raw; /**< BEMF virtual neutral raw 12-bit ADC count. */
+} motor_bemf_raw_frame_t;
+
+/**
+ * @brief Switch ADC sequence from current sensing to BEMF voltage sensing.
+ *
+ * Reconfigures the ADC CHSEL registers to sample BEMF_U, BEMF_V, BEMF_W,
+ * BEMF_COM on the next hardware trigger.  Must be called when no ADC
+ * conversion is in progress (between EOSEQ and next trigger).
+ */
+void MotorHwYtm32_SwitchAdcToBemfSensing(void);
+
+/**
+ * @brief Switch ADC sequence back to current sensing (normal FOC mode).
+ */
+void MotorHwYtm32_SwitchAdcToCurrentSensing(void);
+
+/**
+ * @brief Read a BEMF voltage frame from the ADC FIFO.
+ * @param[out] frame  Pointer to store the acquired BEMF raw data.
+ * @return True on success.
+ */
+bool MotorHwYtm32_ReadBemfFrame(motor_bemf_raw_frame_t *frame);
+
 #endif /* MOTOR_HW_YTM32_H */

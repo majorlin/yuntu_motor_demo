@@ -108,6 +108,12 @@ BO_ 513 PC_CalibWrite: 64 PC
  SG_ CalibSelector : 0|8@1+ (1,0) [0|0] "" Vector__XXX
 
 BO_ 386 MCU_CalibReadback: 64 MCU
+ SG_ WaveformSampleCount : 376|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ WaveformState : 368|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ ActiveCurrentIqKi : 336|32@1+ (1,0) [0|0] "V/A/s" Vector__XXX
+ SG_ ActiveCurrentIqKp : 304|32@1+ (1,0) [0|0] "V/A" Vector__XXX
+ SG_ ActiveCurrentIdKi : 272|32@1+ (1,0) [0|0] "V/A/s" Vector__XXX
+ SG_ ActiveCurrentIdKp : 240|32@1+ (1,0) [0|0] "V/A" Vector__XXX
  SG_ ActiveRpmRamp : 224|16@1+ (1,0) [0|0] "rpm/s" Vector__XXX
  SG_ ActiveFwThreshold : 208|16@1+ (0.0001,0) [0|0] "" Vector__XXX
  SG_ ActiveAlignCurrentA : 192|16@1+ (0.01,0) [0|0] "A" Vector__XXX
@@ -118,6 +124,26 @@ BO_ 386 MCU_CalibReadback: 64 MCU
  SG_ ActiveObsGain : 64|32@1+ (1,0) [0|0] "" Vector__XXX
  SG_ ActiveSpeedKi : 32|32@1+ (1,0) [0|0] "" Vector__XXX
  SG_ ActiveSpeedKp : 0|32@1+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 387 MCU_MotorStatus3: 64 MCU
+ SG_ WfCh6_ElecAngle : 256|32@1+ (1,0) [0|0] "rad" Vector__XXX
+ SG_ WfCh5_Iq : 224|32@1+ (1,0) [0|0] "A" Vector__XXX
+ SG_ WfCh4_Id : 192|32@1+ (1,0) [0|0] "A" Vector__XXX
+ SG_ WfCh3_Vbus : 160|32@1+ (1,0) [0|0] "V" Vector__XXX
+ SG_ WfCh2_Ic : 128|32@1+ (1,0) [0|0] "A" Vector__XXX
+ SG_ WfCh1_Ib : 96|32@1+ (1,0) [0|0] "A" Vector__XXX
+ SG_ WfCh0_Ia : 64|32@1+ (1,0) [0|0] "A" Vector__XXX
+ SG_ WfDecimation : 40|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ WfTriggerSource : 32|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ WfTotalSamples : 16|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ WfSampleIndex : 0|16@1+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 514 PC_TestCommand: 64 PC
+ SG_ TcReserved : 40|24@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ TcTriggerSource : 32|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ TcDecimation : 24|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ TcNSamples : 8|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ TcCommandType : 0|8@1+ (1,0) [0|0] "" Vector__XXX
 
 
 
@@ -185,6 +211,12 @@ CM_ SG_ 513 CalibSpeedKi "Speed PI integral gain";
 CM_ SG_ 513 CalibSpeedKp "Speed PI proportional gain";
 CM_ SG_ 513 CalibSelector "Parameter group selector (0=speed PI, 1=observer, 2=limits)";
 CM_ BO_ 386 "Echo active calibration parameters. Cycle: 200ms.";
+CM_ SG_ 386 WaveformSampleCount "Number of waveform samples captured";
+CM_ SG_ 386 WaveformState "0=Idle,1=Capturing,2=Sending,3=Done";
+CM_ SG_ 386 ActiveCurrentIqKi "Active Q-axis current PI Ki";
+CM_ SG_ 386 ActiveCurrentIqKp "Active Q-axis current PI Kp";
+CM_ SG_ 386 ActiveCurrentIdKi "Active D-axis current PI Ki";
+CM_ SG_ 386 ActiveCurrentIdKp "Active D-axis current PI Kp";
 CM_ SG_ 386 ActiveRpmRamp "Active speed ramp rate";
 CM_ SG_ 386 ActiveFwThreshold "Active FW voltage threshold";
 CM_ SG_ 386 ActiveAlignCurrentA "Active alignment current";
@@ -195,6 +227,24 @@ CM_ SG_ 386 ActivePllKp "Active PLL Kp";
 CM_ SG_ 386 ActiveObsGain "Active observer gain";
 CM_ SG_ 386 ActiveSpeedKi "Active speed PI Ki";
 CM_ SG_ 386 ActiveSpeedKp "Active speed PI Kp";
+CM_ BO_ 387 "PWM-rate waveform burst data. Sent after TestCommand trigger.";
+CM_ SG_ 387 WfCh6_ElecAngle "Electrical angle";
+CM_ SG_ 387 WfCh5_Iq "Q-axis current";
+CM_ SG_ 387 WfCh4_Id "D-axis current";
+CM_ SG_ 387 WfCh3_Vbus "DC bus voltage";
+CM_ SG_ 387 WfCh2_Ic "Phase C current";
+CM_ SG_ 387 WfCh1_Ib "Phase B current";
+CM_ SG_ 387 WfCh0_Ia "Phase A current";
+CM_ SG_ 387 WfDecimation "Decimation factor (sample every N ticks)";
+CM_ SG_ 387 WfTriggerSource "Trigger: 0=none,1=manual,2=startup,3=fault";
+CM_ SG_ 387 WfTotalSamples "Total samples in this capture";
+CM_ SG_ 387 WfSampleIndex "Current sample index in burst";
+CM_ BO_ 514 "Test command from PC. Event-driven.";
+CM_ SG_ 514 TcReserved "Reserved";
+CM_ SG_ 514 TcTriggerSource "Trigger source for capture";
+CM_ SG_ 514 TcDecimation "Decimation factor";
+CM_ SG_ 514 TcNSamples "Number of samples to capture";
+CM_ SG_ 514 TcCommandType "0x01=CaptureStart,0x02=Abort,0x03=Send,0x10=ResetCurrentPI";
 
 
 
@@ -209,6 +259,17 @@ SIG_VALTYPE_ 386 ActiveSpeedKi : 1;
 SIG_VALTYPE_ 386 ActiveObsGain : 1;
 SIG_VALTYPE_ 386 ActivePllKp : 1;
 SIG_VALTYPE_ 386 ActivePllKi : 1;
+SIG_VALTYPE_ 386 ActiveCurrentIdKp : 1;
+SIG_VALTYPE_ 386 ActiveCurrentIdKi : 1;
+SIG_VALTYPE_ 386 ActiveCurrentIqKp : 1;
+SIG_VALTYPE_ 386 ActiveCurrentIqKi : 1;
+SIG_VALTYPE_ 387 WfCh0_Ia : 1;
+SIG_VALTYPE_ 387 WfCh1_Ib : 1;
+SIG_VALTYPE_ 387 WfCh2_Ic : 1;
+SIG_VALTYPE_ 387 WfCh3_Vbus : 1;
+SIG_VALTYPE_ 387 WfCh4_Id : 1;
+SIG_VALTYPE_ 387 WfCh5_Iq : 1;
+SIG_VALTYPE_ 387 WfCh6_ElecAngle : 1;
 
 
 

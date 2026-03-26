@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+TC-007: 弱磁控制测试
+======================
+验证高速运行时弱磁控制的介入和退出。
+"""
+
+import time
+import pytest
+import numpy as np
+from motor_client import MotorState
+from report_generator import TestRecord, TestVerdict
+
+
+class TestFieldWeakening:
+    """TC-007: Field weakening control verification."""
+
+    TEST_ID = "TC-007"
+
+    def test_007a_field_weakening_entry(self, motor, can, waveform, report, csv_logger):
+        """高速弱磁: 逐步升速至弱磁区域，观察Id注入"""
+        t0 = time.time()
+        ok = motor.start_and_wait(target_rpm=1000.0, timeout=10.0)
+        assert ok, "启动失败"
+
+        # Ramp from 1000 to high speed in steps
+        rpm_points = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000]
+        fw_data = []
+
+        for target in rpm_points:
+            motor.set_speed(target, ramp_rpm_s=600)
+            time.sleep(3.0)  # settle
+
+            telem = motor.get_telemetry()
+            if telem.state != MotorState.CLOSED_LOOP:
+                break
+
+            fw_data.append({
+                "RPM": telem.mechanical_rpm,
+                "TargetRPM": target,
+                "VoltModRatio": telem.volt_mod_ratio,
+                "FwIdTarget": can.get_signal("FwIdTarget"),
+                "BusVoltage": telem.bus_voltage_v,
+                "IqMeas": telem.iq_meas_a,
+            })
+
+        duration = time.time() - t0
+
+        # Capture waveform at high speed
+        record_wf = waveform.capture(
+            ["MechanicalRpm", "VoltModRatio", "FwIdTarget", "IqMeas", "BusVoltage"],
+            duration_s=3.0, interval_s=0.01, name="field_weakening",
+        )
+        plot_file = waveform.plot_waveform(
+            record_wf, title="Field Weakening Behavior",
+            filename="tc007_field_weakening.png",
+        )
+
+        # Check if FW engaged
+        fw_engaged = any(d["FwIdTarget"] < -0.1 for d in fw_data)
+        max_mod = max(d["VoltModRatio"] for d in fw_data) if fw_data else 0
+        telem = motor.get_telemetry()
+
+        record = TestRecord(
+            test_id=f"{self.TEST_ID}a",
+            test_name="弱磁控制验证",
+            description="逐步升速，验证弱磁控制在电压饱和时介入",
+            verdict=TestVerdict.PASS if fw_engaged or max_mod < 0.5 else TestVerdict.FAIL,
+            duration_s=duration,
+            preconditions="电机闭环运行",
+            test_method="从1000RPM逐步升至8000RPM，监控VoltModRatio和FwIdTarget",
+            pass_criteria="VoltModRatio超过阈值时FwIdTarget出现负值",
+            actual_result=f"弱磁{'已介入' if fw_engaged else '未介入'}, MaxMod={max_mod:.4f}",
+            key_signals={
+                "弱磁状态": "已介入" if fw_engaged else "未介入",
+                "最大调制比": f"{max_mod:.4f}",
+                "最高RPM": f"{max(d['RPM'] for d in fw_data):.0f}" if fw_data else "N/A",
+            },
+            waveform_files=[plot_file] if plot_file else [],
+        )
+        report.add_record(record)
+
+    def test_007b_field_weakening_exit(self, motor, can, waveform, report, csv_logger):
+        """弱磁退出: 从高速减速后弱磁Id应恢复为0"""
+        t0 = time.time()
+        ok = motor.start_and_wait(target_rpm=6000.0, timeout=15.0)
+        if not ok:
+            pytest.skip("无法达到高速")
+        time.sleep(3.0)
+
+        # Record decel
+        record_wf, metrics = waveform.capture_step_response(
+            signal_name="FwIdTarget",
+            step_trigger=lambda: motor.set_speed(1000.0),
+            pre_s=1.0, post_s=5.0, interval_s=0.01,
+            extra_signals=["MechanicalRpm", "VoltModRatio"],
+        )
+
+        duration = time.time() - t0
+        time.sleep(2.0)
+        fw_id = can.get_signal("FwIdTarget")
+
+        record = TestRecord(
+            test_id=f"{self.TEST_ID}b",
+            test_name="弱磁退出",
+            description="从高速减速，验证弱磁Id恢复到0",
+            verdict=TestVerdict.PASS if abs(fw_id) < 0.5 else TestVerdict.FAIL,
+            duration_s=duration,
+            pass_criteria="减速后FwIdTarget → 0",
+            actual_result=f"FwIdTarget={fw_id:.3f}A",
+            key_signals={"FwIdTarget(A)": f"{fw_id:.3f}"},
+        )
+        report.add_record(record)

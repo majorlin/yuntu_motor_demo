@@ -1,0 +1,7 @@
+python-can>=4.0
+cantools>=39.0
+numpy>=1.24
+matplotlib>=3.7
+pytest>=7.0
+pytest-html>=4.0
+jinja2>=3.1

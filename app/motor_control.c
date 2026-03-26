@@ -10,6 +10,7 @@
 #include "motor_foc.h"
 #include "motor_hw_ytm32.h"
 #include "motor_user_config.h"
+#include "can_config.h"
 #include "sdk_project_config.h"
 
 #define MOTOR_CTRL_DWT_LAR_KEY (0xC5ACCE55UL)
@@ -1237,6 +1238,14 @@ void ADC0_IRQHandler(void) {
       (s_motorCtrl.status.state == MOTOR_STATE_CLOSED_LOOP)
           ? focOutput.observer_angle_rad
           : focInput.control_angle_rad;
+
+  /* --- Waveform capture hook (Status3 high-speed data) --- */
+  CanConfig_WaveformSample(s_motorCtrl.status.phase_current_a,
+                           s_motorCtrl.status.phase_current_b,
+                           s_motorCtrl.status.phase_current_c,
+                           s_motorCtrl.status.bus_voltage_v,
+                           focOutput.id_a, focOutput.iq_a,
+                           s_motorCtrl.status.electrical_angle_rad);
 
   /* Un-mask outputs if not yet done.
    * Wind detect exits via BEMF branch (never reaches here).

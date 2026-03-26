@@ -8,6 +8,12 @@
 #define MOTOR_FOC_EPSILON_F                  (1.0e-6f)
 #define MOTOR_FOC_PLL_SPEED_LIMIT_RAD_S      (120000.0f)
 
+/* ── Runtime-overridable current-loop PI gains ── */
+static float s_idKpVPerA = MOTOR_CFG_ID_KP_V_PER_A;
+static float s_idKiVPerAs = MOTOR_CFG_ID_KI_V_PER_AS;
+static float s_iqKpVPerA = MOTOR_CFG_IQ_KP_V_PER_A;
+static float s_iqKiVPerAs = MOTOR_CFG_IQ_KI_V_PER_AS;
+
 /**
  * @brief Hook for profiling fast-loop timing (defined elsewhere).
  * @param focTotalCycles     Total CPU cycles spent in FOC fast loop.
@@ -428,6 +434,34 @@ void MotorFoc_Reset(motor_foc_state_t *state)
     state->deadtime_comp_sign_c = 0;
 }
 
+void MotorFoc_SetCurrentGains(const motor_foc_current_gains_t *gains)
+{
+    if (gains == NULL)
+    {
+        /* Revert to compile-time defaults */
+        s_idKpVPerA  = MOTOR_CFG_ID_KP_V_PER_A;
+        s_idKiVPerAs = MOTOR_CFG_ID_KI_V_PER_AS;
+        s_iqKpVPerA  = MOTOR_CFG_IQ_KP_V_PER_A;
+        s_iqKiVPerAs = MOTOR_CFG_IQ_KI_V_PER_AS;
+    }
+    else
+    {
+        s_idKpVPerA  = gains->id_kp;
+        s_idKiVPerAs = gains->id_ki;
+        s_iqKpVPerA  = gains->iq_kp;
+        s_iqKiVPerAs = gains->iq_ki;
+    }
+}
+
+void MotorFoc_GetCurrentGains(motor_foc_current_gains_t *gains)
+{
+    if (gains == NULL) return;
+    gains->id_kp = s_idKpVPerA;
+    gains->id_ki = s_idKiVPerAs;
+    gains->iq_kp = s_iqKpVPerA;
+    gains->iq_ki = s_iqKiVPerAs;
+}
+
 void MotorFoc_RunFast(motor_foc_state_t *state,
                       const motor_foc_fast_input_t *input,
                       motor_foc_fast_output_t *output)
@@ -571,11 +605,11 @@ void MotorFoc_RunFast(motor_foc_state_t *state,
     idErr = input->id_target_a - idq.d;
     iqErr = input->iq_target_a - idq.q;
 
-    state->current_pi_d_integrator_v += MOTOR_CFG_ID_KI_V_PER_AS * dt * idErr;
-    state->current_pi_q_integrator_v += MOTOR_CFG_IQ_KI_V_PER_AS * dt * iqErr;
+    state->current_pi_d_integrator_v += s_idKiVPerAs * dt * idErr;
+    state->current_pi_q_integrator_v += s_iqKiVPerAs * dt * iqErr;
 
-    vdq.d = state->current_pi_d_integrator_v + (MOTOR_CFG_ID_KP_V_PER_A * idErr);
-    vdq.q = state->current_pi_q_integrator_v + (MOTOR_CFG_IQ_KP_V_PER_A * iqErr);
+    vdq.d = state->current_pi_d_integrator_v + (s_idKpVPerA * idErr);
+    vdq.q = state->current_pi_q_integrator_v + (s_iqKpVPerA * iqErr);
 
     /* Voltage vector magnitude limiting with integrator anti-windup.
      * If the combined dq voltage exceeds the available bus voltage

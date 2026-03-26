@@ -236,13 +236,90 @@ msg_calib_readback = Message(
             comment="Active FW voltage threshold"),
         sig("ActiveRpmRamp",     224,  16, scale=1, unit="rpm/s",
             comment="Active speed ramp rate"),
+        sig("ActiveCurrentIdKp", 240,  32, is_float=True, unit="V/A",
+            comment="Active D-axis current PI Kp"),
+        sig("ActiveCurrentIdKi", 272,  32, is_float=True, unit="V/A/s",
+            comment="Active D-axis current PI Ki"),
+        sig("ActiveCurrentIqKp", 304,  32, is_float=True, unit="V/A",
+            comment="Active Q-axis current PI Kp"),
+        sig("ActiveCurrentIqKi", 336,  32, is_float=True, unit="V/A/s",
+            comment="Active Q-axis current PI Ki"),
+        sig("WaveformState",     368,   8,
+            comment="0=Idle,1=Capturing,2=Sending,3=Done"),
+        sig("WaveformSampleCount",376, 16,
+            comment="Number of waveform samples captured"),
+    ],
+)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Message 6: MCU_MotorStatus3  (0x183, burst, MCU→PC)
+#   PWM-rate waveform data, one sample per CAN FD frame
+# ═══════════════════════════════════════════════════════════════════════════════
+
+msg_status3 = Message(
+    frame_id=0x183,
+    name="MCU_MotorStatus3",
+    length=64,
+    senders=["MCU"],
+    comment="PWM-rate waveform burst data. Sent after TestCommand trigger.",
+    is_fd=True,
+    signals=[
+        sig("WfSampleIndex",       0,  16,
+            comment="Current sample index in burst"),
+        sig("WfTotalSamples",     16,  16,
+            comment="Total samples in this capture"),
+        sig("WfTriggerSource",    32,   8,
+            comment="Trigger: 0=none,1=manual,2=startup,3=fault"),
+        sig("WfDecimation",       40,   8,
+            comment="Decimation factor (sample every N ticks)"),
+        sig("WfCh0_Ia",           64,  32, is_float=True, unit="A",
+            comment="Phase A current"),
+        sig("WfCh1_Ib",           96,  32, is_float=True, unit="A",
+            comment="Phase B current"),
+        sig("WfCh2_Ic",          128,  32, is_float=True, unit="A",
+            comment="Phase C current"),
+        sig("WfCh3_Vbus",        160,  32, is_float=True, unit="V",
+            comment="DC bus voltage"),
+        sig("WfCh4_Id",          192,  32, is_float=True, unit="A",
+            comment="D-axis current"),
+        sig("WfCh5_Iq",          224,  32, is_float=True, unit="A",
+            comment="Q-axis current"),
+        sig("WfCh6_ElecAngle",   256,  32, is_float=True, unit="rad",
+            comment="Electrical angle"),
+    ],
+)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Message 7: PC_TestCommand (0x202, event, PC→MCU)
+#   PC-triggered waveform capture and current loop reset
+# ═══════════════════════════════════════════════════════════════════════════════
+
+msg_test_command = Message(
+    frame_id=0x202,
+    name="PC_TestCommand",
+    length=64,
+    senders=["PC"],
+    comment="Test command from PC. Event-driven.",
+    is_fd=True,
+    signals=[
+        sig("TcCommandType",       0,   8,
+            comment="0x01=CaptureStart,0x02=Abort,0x03=Send,0x10=ResetCurrentPI"),
+        sig("TcNSamples",          8,  16,
+            comment="Number of samples to capture"),
+        sig("TcDecimation",       24,   8,
+            comment="Decimation factor"),
+        sig("TcTriggerSource",    32,   8,
+            comment="Trigger source for capture"),
+        sig("TcReserved",         40,  24,
+            comment="Reserved"),
     ],
 )
 
 # ─── Build Database ─────────────────────────────────────────────────────────────
 
 db = Database(
-    messages=[msg_status1, msg_status2, msg_command, msg_calib_write, msg_calib_readback],
+    messages=[msg_status1, msg_status2, msg_command, msg_calib_write,
+              msg_calib_readback, msg_status3, msg_test_command],
     nodes=[NODE_MCU, NODE_PC],
     version="1.0",
 )
@@ -333,6 +410,20 @@ test_vectors = {
         "ActiveObsGain": 1800000.0, "ActivePllKp": 120.0, "ActivePllKi": 6000.0,
         "ActiveMaxIqA": 16.0, "ActiveOpenLoopIqA": 8.0, "ActiveAlignCurrentA": 5.0,
         "ActiveFwThreshold": 0.5000, "ActiveRpmRamp": 600,
+        "ActiveCurrentIdKp": 12.5, "ActiveCurrentIdKi": 2400.0,
+        "ActiveCurrentIqKp": 18.0, "ActiveCurrentIqKi": 3600.0,
+        "WaveformState": 0, "WaveformSampleCount": 0,
+    },
+    "MCU_MotorStatus3": {
+        "WfSampleIndex": 42, "WfTotalSamples": 128,
+        "WfTriggerSource": 1, "WfDecimation": 2,
+        "WfCh0_Ia": 3.14, "WfCh1_Ib": -1.57, "WfCh2_Ic": -1.57,
+        "WfCh3_Vbus": 12.0, "WfCh4_Id": 0.01, "WfCh5_Iq": 2.50,
+        "WfCh6_ElecAngle": 1.5708,
+    },
+    "PC_TestCommand": {
+        "TcCommandType": 1, "TcNSamples": 256,
+        "TcDecimation": 4, "TcTriggerSource": 1, "TcReserved": 0,
     },
 }
 

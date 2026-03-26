@@ -75,11 +75,13 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
-#define CAN_MSG_ID_MOTOR_STATUS1 (0x180U)  /**< MCU→PC, 50ms  */
-#define CAN_MSG_ID_MOTOR_STATUS2 (0x181U)  /**< MCU→PC, 50ms  */
+#define CAN_MSG_ID_MOTOR_STATUS1 (0x180U)  /**< MCU→PC, 10ms  */
+#define CAN_MSG_ID_MOTOR_STATUS2 (0x181U)  /**< MCU→PC, 10ms  */
 #define CAN_MSG_ID_CALIB_READBACK (0x182U) /**< MCU→PC, 200ms */
+#define CAN_MSG_ID_MOTOR_STATUS3 (0x183U)  /**< MCU→PC, burst */
 #define CAN_MSG_ID_MOTOR_COMMAND (0x200U)  /**< PC→MCU, event */
 #define CAN_MSG_ID_CALIB_WRITE (0x201U)    /**< PC→MCU, event */
+#define CAN_MSG_ID_TEST_COMMAND (0x202U)   /**< PC→MCU, event */
 
 /** @brief CAN FD data payload size in bytes (64). */
 #define CAN_MSG_DLC (64U)
@@ -92,8 +94,10 @@
 #define CAN_MB_TX_STATUS1 (0U)
 #define CAN_MB_TX_STATUS2 (1U)
 #define CAN_MB_TX_CALIB_READBACK (2U)
-#define CAN_MB_RX_COMMAND (3U)
-#define CAN_MB_RX_CALIB_WRITE (4U)
+#define CAN_MB_TX_STATUS3 (3U)
+#define CAN_MB_RX_COMMAND (4U)
+#define CAN_MB_RX_CALIB_WRITE (5U)
+#define CAN_MB_RX_TEST_COMMAND (6U)
 
 /* ═══════════════════════════════════════════════════════════════════════════════
  * TX Cycle Periods (milliseconds)
@@ -121,6 +125,12 @@ typedef struct {
   float speed_kp; /**< Speed loop proportional gain.      */
   float speed_ki; /**< Speed loop integral gain.          */
 
+  /* Current PI (runtime override for FOC current loop) */
+  float current_id_kp; /**< D-axis current PI Kp (V/A).       */
+  float current_id_ki; /**< D-axis current PI Ki (V/A/s).     */
+  float current_iq_kp; /**< Q-axis current PI Kp (V/A).       */
+  float current_iq_ki; /**< Q-axis current PI Ki (V/A/s).     */
+
   /* Observer */
   float observer_gain; /**< Ortega observer correction gain.   */
   float pll_kp;        /**< PLL proportional gain.             */
@@ -136,6 +146,60 @@ typedef struct {
   bool pending;   /**< True when new values received.     */
   bool committed; /**< True after CalibApply = 0xFF.      */
 } can_calib_params_t;
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * Waveform Burst Capture (Status3)
+ * ═══════════════════════════════════════════════════════════════════════════════
+ */
+
+/** @brief Maximum samples per waveform capture burst. */
+#define CAN_WAVEFORM_MAX_SAMPLES (256U)
+
+/** @brief Number of float channels per waveform sample. */
+#define CAN_WAVEFORM_CHANNELS (7U)
+
+/**
+ * @brief Waveform capture trigger source.
+ */
+typedef enum {
+    CAN_WAVEFORM_TRIG_NONE    = 0,  /**< No active capture.           */
+    CAN_WAVEFORM_TRIG_MANUAL  = 1,  /**< PC-triggered manual capture. */
+    CAN_WAVEFORM_TRIG_STARTUP = 2,  /**< Auto-capture on startup.     */
+    CAN_WAVEFORM_TRIG_FAULT   = 3,  /**< Auto-capture on fault.       */
+} can_waveform_trigger_t;
+
+/**
+ * @brief Waveform capture state.
+ */
+typedef enum {
+    CAN_WAVEFORM_IDLE      = 0,  /**< Not capturing.               */
+    CAN_WAVEFORM_CAPTURING = 1,  /**< Currently recording samples. */
+    CAN_WAVEFORM_SENDING   = 2,  /**< Uploading via Status3 burst.  */
+    CAN_WAVEFORM_DONE      = 3,  /**< Upload complete.              */
+} can_waveform_state_t;
+
+/**
+ * @brief Per-sample waveform data captured at PWM rate.
+ *
+ * Channels: Ia, Ib, Ic, Vbus, Id, Iq, ElecAngle
+ */
+typedef struct {
+    float channels[CAN_WAVEFORM_CHANNELS];
+} can_waveform_sample_t;
+
+/**
+ * @brief Waveform capture control block.
+ */
+typedef struct {
+    can_waveform_trigger_t trigger;  /**< What triggered this capture.    */
+    can_waveform_state_t   state;    /**< Current capture state.          */
+    uint16_t               n_samples;/**< Requested number of samples.    */
+    uint16_t               write_idx;/**< Current write index.            */
+    uint16_t               send_idx; /**< Current send index (for burst). */
+    uint8_t                decimation;/**< Sample every N fast-loop ticks. */
+    uint8_t                tick_count;/**< Internal tick counter.          */
+    can_waveform_sample_t  samples[CAN_WAVEFORM_MAX_SAMPLES];
+} can_waveform_capture_t;
 
 /**
  * @brief Temperature readings structure.
@@ -199,5 +263,28 @@ bool CanConfig_IsCalibCommitted(void);
  * the new parameter values.
  */
 void CanConfig_AckCalibApplied(void);
+
+/**
+ * @brief Call from the fast-loop ISR to record one waveform sample.
+ *
+ * If a waveform capture is active, stores the provided channel data
+ * into the ring buffer. Must be called at PWM rate.
+ *
+ * @param ia   Phase A current (A).
+ * @param ib   Phase B current (A).
+ * @param ic   Phase C current (A).
+ * @param vbus Bus voltage (V).
+ * @param id   D-axis current (A).
+ * @param iq   Q-axis current (A).
+ * @param angle Electrical angle (rad).
+ */
+void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
+                              float id, float iq, float angle);
+
+/**
+ * @brief Get the current waveform capture state.
+ * @return Current waveform state enum value.
+ */
+can_waveform_state_t CanConfig_GetWaveformState(void);
 
 #endif /* __CAN_CONFIG_H__ */

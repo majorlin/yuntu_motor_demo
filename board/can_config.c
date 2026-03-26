@@ -22,6 +22,10 @@
 #include "motor_user_config.h"
 #include "sdk_project_config.h"
 
+/* Forward declaration for current gain API */
+extern void MotorFoc_SetCurrentGains(const motor_foc_current_gains_t *gains);
+extern void MotorFoc_GetCurrentGains(motor_foc_current_gains_t *gains);
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Internal State
  * ═══════════════════════════════════════════════════════════════════════════════ */
@@ -32,9 +36,13 @@ static flexcan_state_t s_canState;
 /** @brief TX data buffer (64 bytes). */
 static uint8_t s_txBuf[CAN_MSG_DLC];
 
+/** @brief Secondary TX buffer for Status3 burst (avoid conflict with main). */
+static uint8_t s_txBuf3[CAN_MSG_DLC];
+
 /** @brief RX message buffer structures. */
 static flexcan_msgbuff_t s_rxMbCommand;
 static flexcan_msgbuff_t s_rxMbCalibWrite;
+static flexcan_msgbuff_t s_rxMbTestCommand;
 
 /** @brief TX scheduling counters. */
 static uint32_t s_lastTxStatus1Ms;
@@ -47,9 +55,13 @@ static can_temperature_t s_temperature;
 /** @brief Runtime calibration parameters (RAM). */
 static can_calib_params_t s_calibParams;
 
+/** @brief Waveform capture control block. */
+static can_waveform_capture_t s_waveformCapture;
+
 /** @brief Flag: RX command message received and pending processing. */
 static volatile bool s_rxCommandPending;
 static volatile bool s_rxCalibPending;
+static volatile bool s_rxTestCmdPending;
 
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Signal Packing Helpers (Little-Endian, match DBC)
@@ -145,7 +157,6 @@ static void CanConfig_Callback(uint8_t instance, flexcan_event_type_t eventType,
         if (buffIdx == CAN_MB_RX_COMMAND)
         {
             s_rxCommandPending = true;
-            /* Re-arm RX MB for next message */
             FLEXCAN_DRV_Receive(CAN_CFG_INSTANCE, CAN_MB_RX_COMMAND,
                                 &s_rxMbCommand);
         }
@@ -154,6 +165,12 @@ static void CanConfig_Callback(uint8_t instance, flexcan_event_type_t eventType,
             s_rxCalibPending = true;
             FLEXCAN_DRV_Receive(CAN_CFG_INSTANCE, CAN_MB_RX_CALIB_WRITE,
                                 &s_rxMbCalibWrite);
+        }
+        else if (buffIdx == CAN_MB_RX_TEST_COMMAND)
+        {
+            s_rxTestCmdPending = true;
+            FLEXCAN_DRV_Receive(CAN_CFG_INSTANCE, CAN_MB_RX_TEST_COMMAND,
+                                &s_rxMbTestCommand);
         }
     }
 }
@@ -319,6 +336,63 @@ static void CanConfig_SendStatus2(void)
 }
 
 /**
+ * @brief Pack and send MCU_MotorStatus3 (0x183) — waveform burst frame.
+ *
+ * Each Status3 frame carries up to 2 waveform samples (7 float channels each
+ * = 28 bytes/sample, 56 bytes total fits in 64-byte CAN FD payload).
+ * Header: [byte 0] = send_idx low, [byte 1] = send_idx high,
+ *         [byte 2] = total samples low, [byte 3] = total samples high,
+ *         [byte 4] = trigger type, [byte 5] = decimation,
+ *         [byte 6-7] = reserved
+ * Payload: 2 samples × 7 × float32 = 56 bytes starting at byte 8.
+ * But 8 + 56 = 64, exactly one FD frame.
+ * For simplicity: pack 1 sample per frame (28 bytes data + 8 header = 36).
+ */
+static void CanConfig_SendStatus3Burst(void)
+{
+    if (s_waveformCapture.state != CAN_WAVEFORM_SENDING)
+    {
+        return;
+    }
+
+    uint16_t idx = s_waveformCapture.send_idx;
+    if (idx >= s_waveformCapture.write_idx)
+    {
+        /* All samples sent */
+        s_waveformCapture.state = CAN_WAVEFORM_DONE;
+        return;
+    }
+
+    memset(s_txBuf3, 0, CAN_MSG_DLC);
+
+    /* Header */
+    pack_u16(s_txBuf3, 0, idx);                             /* SampleIndex */
+    pack_u16(s_txBuf3, 2, s_waveformCapture.write_idx);     /* TotalSamples */
+    pack_u8(s_txBuf3, 4, (uint8_t)s_waveformCapture.trigger);
+    pack_u8(s_txBuf3, 5, s_waveformCapture.decimation);
+
+    /* Payload: 7 × float32 = 28 bytes starting at byte 8 */
+    const can_waveform_sample_t *sample = &s_waveformCapture.samples[idx];
+    for (uint8_t ch = 0; ch < CAN_WAVEFORM_CHANNELS; ch++)
+    {
+        pack_f32(s_txBuf3, 8U + (ch * 4U), sample->channels[ch]);
+    }
+
+    static const flexcan_data_info_t txInfo = {
+        .msg_id_type = FLEXCAN_MSG_ID_STD,
+        .data_length = CAN_MSG_DLC,
+        .fd_enable   = true,
+        .fd_padding  = 0x00U,
+        .enable_brs  = true,
+        .is_remote   = false,
+    };
+    FLEXCAN_DRV_Send(CAN_CFG_INSTANCE, CAN_MB_TX_STATUS3,
+                     &txInfo, CAN_MSG_ID_MOTOR_STATUS3, s_txBuf3);
+
+    s_waveformCapture.send_idx = idx + 1;
+}
+
+/**
  * @brief Pack and send MCU_CalibReadback (0x182).
  */
 static void CanConfig_SendCalibReadback(void)
@@ -345,6 +419,20 @@ static void CanConfig_SendCalibReadback(void)
     pack_u16(s_txBuf, 26, (uint16_t)(s_calibParams.fw_voltage_threshold / 0.0001f));
     /* Bytes 28-29: ActiveRpmRamp, scale=1 */
     pack_u16(s_txBuf, 28, (uint16_t)s_calibParams.speed_ramp_rpm_per_s);
+
+    /* Bytes 30-33: ActiveCurrentIdKp (float32) */
+    pack_f32(s_txBuf, 30, s_calibParams.current_id_kp);
+    /* Bytes 34-37: ActiveCurrentIdKi (float32) */
+    pack_f32(s_txBuf, 34, s_calibParams.current_id_ki);
+    /* Bytes 38-41: ActiveCurrentIqKp (float32) */
+    pack_f32(s_txBuf, 38, s_calibParams.current_iq_kp);
+    /* Bytes 42-45: ActiveCurrentIqKi (float32) */
+    pack_f32(s_txBuf, 42, s_calibParams.current_iq_ki);
+
+    /* Byte 46: WaveformState */
+    pack_u8(s_txBuf, 46, (uint8_t)s_waveformCapture.state);
+    /* Bytes 47-48: WaveformSampleCount */
+    pack_u16(s_txBuf, 47, s_waveformCapture.write_idx);
 
     static const flexcan_data_info_t txInfo = {
         .msg_id_type = FLEXCAN_MSG_ID_STD,
@@ -408,17 +496,38 @@ static void CanConfig_ProcessCalibWrite(void)
 {
     const uint8_t *data = s_rxMbCalibWrite.data;
 
-    /* uint8_t selector = unpack_u8(data, 0); — reserved for future group select */
+    uint8_t selector = unpack_u8(data, 0);
 
-    s_calibParams.speed_kp            = unpack_f32(data,  1);
-    s_calibParams.speed_ki            = unpack_f32(data,  5);
-    s_calibParams.observer_gain       = unpack_f32(data,  9);
-    s_calibParams.pll_kp              = unpack_f32(data, 13);
-    s_calibParams.pll_ki              = unpack_f32(data, 17);
-    s_calibParams.max_iq_a            = (float)unpack_u16(data, 21) * 0.01f;
-    s_calibParams.open_loop_iq_a      = (float)unpack_u16(data, 23) * 0.01f;
-    s_calibParams.align_current_a     = (float)unpack_u16(data, 25) * 0.01f;
-    s_calibParams.fw_voltage_threshold = (float)unpack_u16(data, 27) * 0.0001f;
+    if (selector == 0U || selector == 1U)
+    {
+        /* Group 0/1: Speed + Observer + Limits (original layout) */
+        s_calibParams.speed_kp            = unpack_f32(data,  1);
+        s_calibParams.speed_ki            = unpack_f32(data,  5);
+        s_calibParams.observer_gain       = unpack_f32(data,  9);
+        s_calibParams.pll_kp              = unpack_f32(data, 13);
+        s_calibParams.pll_ki              = unpack_f32(data, 17);
+        s_calibParams.max_iq_a            = (float)unpack_u16(data, 21) * 0.01f;
+        s_calibParams.open_loop_iq_a      = (float)unpack_u16(data, 23) * 0.01f;
+        s_calibParams.align_current_a     = (float)unpack_u16(data, 25) * 0.01f;
+        s_calibParams.fw_voltage_threshold = (float)unpack_u16(data, 27) * 0.0001f;
+    }
+    else if (selector == 2U)
+    {
+        /* Group 2: Current loop PI gains */
+        s_calibParams.current_id_kp = unpack_f32(data, 1);
+        s_calibParams.current_id_ki = unpack_f32(data, 5);
+        s_calibParams.current_iq_kp = unpack_f32(data, 9);
+        s_calibParams.current_iq_ki = unpack_f32(data, 13);
+
+        /* Apply current loop gains immediately to FOC engine */
+        motor_foc_current_gains_t gains = {
+            .id_kp = s_calibParams.current_id_kp,
+            .id_ki = s_calibParams.current_id_ki,
+            .iq_kp = s_calibParams.current_iq_kp,
+            .iq_ki = s_calibParams.current_iq_ki,
+        };
+        MotorFoc_SetCurrentGains(&gains);
+    }
 
     uint8_t apply = unpack_u8(data, 29);
 
@@ -427,6 +536,89 @@ static void CanConfig_ProcessCalibWrite(void)
     if (apply == 0xFFU)
     {
         s_calibParams.committed = true;
+    }
+}
+
+/**
+ * @brief Process a received PC_TestCommand (0x202).
+ *
+ * Byte layout:
+ *   [0]   Command type:
+ *           0x01 = Start waveform capture
+ *           0x02 = Abort waveform capture
+ *           0x03 = Start sending captured data (burst)
+ *           0x10 = Reset current PI to defaults
+ *   [1-2] N samples (uint16, for capture start)
+ *   [3]   Decimation factor (sample every N ticks, default 1)
+ *   [4]   Trigger source (can_waveform_trigger_t)
+ */
+static void CanConfig_ProcessTestCommand(void)
+{
+    const uint8_t *data = s_rxMbTestCommand.data;
+    uint8_t cmd = unpack_u8(data, 0);
+
+    switch (cmd)
+    {
+        case 0x01U: /* Start waveform capture */
+        {
+            uint16_t nSamples = unpack_u16(data, 1);
+            uint8_t decimation = unpack_u8(data, 3);
+            uint8_t trigSrc = unpack_u8(data, 4);
+
+            if (nSamples > CAN_WAVEFORM_MAX_SAMPLES)
+            {
+                nSamples = CAN_WAVEFORM_MAX_SAMPLES;
+            }
+            if (nSamples == 0U)
+            {
+                nSamples = 128U;
+            }
+            if (decimation == 0U)
+            {
+                decimation = 1U;
+            }
+
+            s_waveformCapture.trigger    = (can_waveform_trigger_t)trigSrc;
+            s_waveformCapture.n_samples  = nSamples;
+            s_waveformCapture.write_idx  = 0U;
+            s_waveformCapture.send_idx   = 0U;
+            s_waveformCapture.decimation = decimation;
+            s_waveformCapture.tick_count = 0U;
+            s_waveformCapture.state      = CAN_WAVEFORM_CAPTURING;
+            break;
+        }
+
+        case 0x02U: /* Abort capture */
+            s_waveformCapture.state = CAN_WAVEFORM_IDLE;
+            break;
+
+        case 0x03U: /* Start sending */
+            if (s_waveformCapture.state == CAN_WAVEFORM_IDLE ||
+                s_waveformCapture.state == CAN_WAVEFORM_DONE)
+            {
+                /* Only send if we have data and not currently capturing */
+                if (s_waveformCapture.write_idx > 0U)
+                {
+                    s_waveformCapture.send_idx = 0U;
+                    s_waveformCapture.state = CAN_WAVEFORM_SENDING;
+                }
+            }
+            break;
+
+        case 0x10U: /* Reset current PI to compile-time defaults */
+        {
+            MotorFoc_SetCurrentGains(NULL);
+            motor_foc_current_gains_t defs;
+            MotorFoc_GetCurrentGains(&defs);
+            s_calibParams.current_id_kp = defs.id_kp;
+            s_calibParams.current_id_ki = defs.id_ki;
+            s_calibParams.current_iq_kp = defs.iq_kp;
+            s_calibParams.current_iq_ki = defs.iq_ki;
+            break;
+        }
+
+        default:
+            break;
     }
 }
 
@@ -439,6 +631,10 @@ void CanConfig_Init(void)
     /* ── Initialize calibration parameters from compile-time defaults ── */
     s_calibParams.speed_kp             = MOTOR_CFG_SPEED_KP;
     s_calibParams.speed_ki             = MOTOR_CFG_SPEED_KI;
+    s_calibParams.current_id_kp        = MOTOR_CFG_ID_KP_V_PER_A;
+    s_calibParams.current_id_ki        = MOTOR_CFG_ID_KI_V_PER_AS;
+    s_calibParams.current_iq_kp        = MOTOR_CFG_IQ_KP_V_PER_A;
+    s_calibParams.current_iq_ki        = MOTOR_CFG_IQ_KI_V_PER_AS;
     s_calibParams.observer_gain        = MOTOR_CFG_OBSERVER_GAIN;
     s_calibParams.pll_kp               = MOTOR_CFG_PLL_KP;
     s_calibParams.pll_ki               = MOTOR_CFG_PLL_KI;
@@ -453,8 +649,13 @@ void CanConfig_Init(void)
     s_temperature.pcb_temperature_degc  = 0.0f;
     s_temperature.chip_temperature_degc = 0.0f;
 
-    s_rxCommandPending = false;
-    s_rxCalibPending   = false;
+    s_rxCommandPending  = false;
+    s_rxCalibPending    = false;
+    s_rxTestCmdPending  = false;
+
+    /* Init waveform capture */
+    memset(&s_waveformCapture, 0, sizeof(s_waveformCapture));
+    s_waveformCapture.state = CAN_WAVEFORM_IDLE;
 
     /* ── Wake CAN transceiver (STB low = active) ── */
     PINS_DRV_WritePin(CAN_CFG_STB_PORT, CAN_CFG_STB_PIN, 0U);
@@ -463,7 +664,7 @@ void CanConfig_Init(void)
     flexcan_user_config_t canConfig;
     (void)FLEXCAN_DRV_GetDefaultConfig(&canConfig);
 
-    canConfig.max_num_mb      = 8U;
+    canConfig.max_num_mb      = 10U;
     canConfig.flexcanMode     = FLEXCAN_NORMAL_MODE;
     canConfig.fd_enable       = true;
     canConfig.payload         = FLEXCAN_PAYLOAD_SIZE_64;
@@ -510,6 +711,8 @@ void CanConfig_Init(void)
                                &txInfo, CAN_MSG_ID_MOTOR_STATUS2);
         FLEXCAN_DRV_ConfigTxMb(CAN_CFG_INSTANCE, CAN_MB_TX_CALIB_READBACK,
                                &txInfo, CAN_MSG_ID_CALIB_READBACK);
+        FLEXCAN_DRV_ConfigTxMb(CAN_CFG_INSTANCE, CAN_MB_TX_STATUS3,
+                               &txInfo, CAN_MSG_ID_MOTOR_STATUS3);
     }
 
     /* ── Configure RX message buffers ── */
@@ -526,6 +729,8 @@ void CanConfig_Init(void)
                                &rxInfo, CAN_MSG_ID_MOTOR_COMMAND);
         FLEXCAN_DRV_ConfigRxMb(CAN_CFG_INSTANCE, CAN_MB_RX_CALIB_WRITE,
                                &rxInfo, CAN_MSG_ID_CALIB_WRITE);
+        FLEXCAN_DRV_ConfigRxMb(CAN_CFG_INSTANCE, CAN_MB_RX_TEST_COMMAND,
+                               &rxInfo, CAN_MSG_ID_TEST_COMMAND);
     }
 
     /* ── Set individual masks for exact ID match ── */
@@ -534,10 +739,13 @@ void CanConfig_Init(void)
                                     CAN_MB_RX_COMMAND, 0x7FFU);
     FLEXCAN_DRV_SetRxIndividualMask(CAN_CFG_INSTANCE, FLEXCAN_MSG_ID_STD,
                                     CAN_MB_RX_CALIB_WRITE, 0x7FFU);
+    FLEXCAN_DRV_SetRxIndividualMask(CAN_CFG_INSTANCE, FLEXCAN_MSG_ID_STD,
+                                    CAN_MB_RX_TEST_COMMAND, 0x7FFU);
 
     /* ── Arm RX message buffers ── */
     FLEXCAN_DRV_Receive(CAN_CFG_INSTANCE, CAN_MB_RX_COMMAND, &s_rxMbCommand);
     FLEXCAN_DRV_Receive(CAN_CFG_INSTANCE, CAN_MB_RX_CALIB_WRITE, &s_rxMbCalibWrite);
+    FLEXCAN_DRV_Receive(CAN_CFG_INSTANCE, CAN_MB_RX_TEST_COMMAND, &s_rxMbTestCommand);
 
     /* ── Initialize TX timers ── */
     s_lastTxStatus1Ms = 0U;
@@ -560,6 +768,12 @@ void CanConfig_Task(uint32_t tickMs)
         CanConfig_ProcessCalibWrite();
     }
 
+    if (s_rxTestCmdPending)
+    {
+        s_rxTestCmdPending = false;
+        CanConfig_ProcessTestCommand();
+    }
+
     /* ── Periodic TX scheduling ── */
     if ((tickMs - s_lastTxStatus1Ms) >= CAN_TX_PERIOD_STATUS1_MS)
     {
@@ -577,6 +791,12 @@ void CanConfig_Task(uint32_t tickMs)
     {
         s_lastTxCalibMs = tickMs;
         CanConfig_SendCalibReadback();
+    }
+
+    /* ── Waveform burst send (1 frame per task call while SENDING) ── */
+    if (s_waveformCapture.state == CAN_WAVEFORM_SENDING)
+    {
+        CanConfig_SendStatus3Burst();
     }
 }
 
@@ -600,4 +820,45 @@ void CanConfig_AckCalibApplied(void)
 {
     s_calibParams.committed = false;
     s_calibParams.pending   = false;
+}
+
+void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
+                              float id, float iq, float angle)
+{
+    if (s_waveformCapture.state != CAN_WAVEFORM_CAPTURING)
+    {
+        return;
+    }
+
+    /* Decimation: only record every N ticks */
+    s_waveformCapture.tick_count++;
+    if (s_waveformCapture.tick_count < s_waveformCapture.decimation)
+    {
+        return;
+    }
+    s_waveformCapture.tick_count = 0U;
+
+    uint16_t idx = s_waveformCapture.write_idx;
+    if (idx >= s_waveformCapture.n_samples)
+    {
+        /* Buffer full — stop capturing, ready for sending */
+        s_waveformCapture.state = CAN_WAVEFORM_IDLE;
+        return;
+    }
+
+    can_waveform_sample_t *sample = &s_waveformCapture.samples[idx];
+    sample->channels[0] = ia;
+    sample->channels[1] = ib;
+    sample->channels[2] = ic;
+    sample->channels[3] = vbus;
+    sample->channels[4] = id;
+    sample->channels[5] = iq;
+    sample->channels[6] = angle;
+
+    s_waveformCapture.write_idx = idx + 1U;
+}
+
+can_waveform_state_t CanConfig_GetWaveformState(void)
+{
+    return s_waveformCapture.state;
 }

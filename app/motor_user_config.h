@@ -265,7 +265,8 @@
 /* Closed-loop phase blend duration in milliseconds. */
 #define MOTOR_CFG_CLOSED_LOOP_BLEND_MS (300U)
 
-/* ======================== Startup Retry / Stall Detect ===================== */
+/* ======================== Startup Retry / Stall Detect =====================
+ */
 
 /** @brief Maximum number of automatic startup retries before hard fault.
  * Set to 0 to disable retry (original timeout → fault behavior). */
@@ -299,11 +300,15 @@
 
 /** @brief Wind detect observer settling timeout (ms).
  * 鼓风机叶轮惯量大，停机后仍可能高速旋转，给观察器更多收敛时间。 */
-#define MOTOR_CFG_WIND_DETECT_TIMEOUT_MS (1000U)
+#define MOTOR_CFG_WIND_DETECT_TIMEOUT_MS (500U)
 
-/** @brief Electrical speed below which the rotor is considered standstill
- * (rad/s). 提高阈值防止观测器噪声产生的虚假速度触发 CatchSpin。 */
-#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S (120.0f)
+/** @brief Mechanical RPM below which the rotor is treated as standstill during
+ * wind detection. 实测表明 200 RPM 以上才能可靠捕获，设 150 RPM 留余量。 */
+#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM (150.0f)
+
+/** @brief Derived electrical speed standstill threshold (rad/s). */
+#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S                                 \
+  MOTOR_CFG_MECH_RPM_TO_ELEC_RAD_S(MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM)
 
 /** @brief Number of consecutive speed-loop samples with stable speed to declare
  * convergence. 增加到 120 要求观测器速度持续稳定 120ms 才决策，过滤短暂噪声。
@@ -315,8 +320,8 @@
 #define MOTOR_CFG_WIND_DETECT_SPEED_TOL_RAD_S (20.0f)
 
 /** @brief Maximum mechanical RPM for direct tailwind catch. Above this, brake
- * first. */
-#define MOTOR_CFG_CATCH_MAX_SPEED_RPM (300.0f)
+ * first. 提高到 2000 RPM 使大部分顺风场景都能直接闭环。 */
+#define MOTOR_CFG_CATCH_MAX_SPEED_RPM (2000.0f)
 
 /** @brief Electrical speed threshold for coast-down to transition to Align
  * (rad/s). Set below the wind-detect standstill threshold so the motor is

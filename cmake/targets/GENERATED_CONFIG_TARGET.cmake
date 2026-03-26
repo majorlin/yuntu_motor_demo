@@ -30,6 +30,7 @@ set(includes
     ${PROJ_DIR}/board
 )
 set(priIncludes
+    ${PROJ_DIR}/app
 )
 
 add_library(GENERATED_CONFIG_TARGET STATIC ${sources})

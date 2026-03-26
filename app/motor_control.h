@@ -200,4 +200,41 @@ uint32_t MotorControl_GetTickMs(void);
  */
 float MotorControl_GetWindDetectSpeedRpm(void);
 
+/**
+ * @brief Snapshot of FOC internal diagnostics for CAN telemetry.
+ *
+ * Exposes observer, PLL, and PI integrator state for real-time logging
+ * and online calibration verification via the CAN FD Status2 message.
+ */
+typedef struct {
+    float observer_angle_rad;        /**< Observer estimated electrical angle.   */
+    float observer_flux_vs;          /**< Adaptive flux-linkage estimate (V·s).  */
+    float pll_speed_rad_s;           /**< PLL estimated electrical speed.        */
+    float phase_error_rad;           /**< Control-to-observer phase error.       */
+    float speed_pi_integrator_a;     /**< Speed PI integrator state (A).         */
+    float id_pi_integrator_v;        /**< D-axis current PI integrator (V).      */
+    float iq_pi_integrator_v;        /**< Q-axis current PI integrator (V).      */
+    float voltage_modulation_ratio;  /**< |Vab|/Vbus modulation ratio.           */
+    float fw_id_target_a;            /**< Field weakening d-axis current.        */
+    float open_loop_angle_rad;       /**< Forced open-loop angle.               */
+    float open_loop_speed_rad_s;     /**< Open-loop forced speed.               */
+    float closed_loop_blend;         /**< Closed-loop blend factor [0..1].       */
+    uint32_t state_time_ms;          /**< Time in current state (ms).            */
+    float obs_lock_residual_rad;     /**< Observer lock residual angle.          */
+    uint16_t stall_div_count;        /**< Consecutive stall divergence count.    */
+    float duty_u;                    /**< Phase U PWM duty [0..1].               */
+    float duty_v;                    /**< Phase V PWM duty [0..1].               */
+    float duty_w;                    /**< Phase W PWM duty [0..1].               */
+} motor_foc_diagnostics_t;
+
+/**
+ * @brief Populate a FOC diagnostics snapshot from internal state.
+ *
+ * Thread-safe: copies volatile data into the caller-provided struct.
+ * Intended for periodic CAN telemetry (50ms cycle), not ISR context.
+ *
+ * @param[out] diag  Pointer to diagnostics structure to fill.
+ */
+void MotorControl_GetFocDiagnostics(motor_foc_diagnostics_t *diag);
+
 #endif /* MOTOR_CONTROL_H */

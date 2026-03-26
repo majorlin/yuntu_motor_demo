@@ -1197,3 +1197,36 @@ void pTMR0_Ch0_IRQHandler(void) {
   MotorHwYtm32_ClearSpeedLoopIrq();
   MotorControl_HandleSlowLoop();
 }
+
+/**
+ * @brief Populate a FOC diagnostics snapshot for CAN telemetry.
+ */
+void MotorControl_GetFocDiagnostics(motor_foc_diagnostics_t *diag) {
+  if (diag == NULL) {
+    return;
+  }
+
+  diag->observer_angle_rad       = s_motorCtrl.foc.pll_phase_rad;
+  diag->observer_flux_vs         = s_motorCtrl.foc.observer_lambda_vs;
+  diag->pll_speed_rad_s          = s_motorCtrl.foc.pll_speed_rad_s;
+  diag->phase_error_rad          = s_motorCtrl.latestPhaseErrorRad;
+  diag->speed_pi_integrator_a    = s_motorCtrl.foc.speed_pi_integrator_a;
+  diag->id_pi_integrator_v       = s_motorCtrl.foc.current_pi_d_integrator_v;
+  diag->iq_pi_integrator_v       = s_motorCtrl.foc.current_pi_q_integrator_v;
+  diag->voltage_modulation_ratio = s_motorCtrl.voltageModulationRatio;
+  diag->fw_id_target_a           = s_motorCtrl.fwIdTargetA;
+  diag->open_loop_angle_rad      = s_motorCtrl.openLoopAngleRad;
+  diag->open_loop_speed_rad_s    = s_motorCtrl.openLoopSpeedRadS;
+  diag->closed_loop_blend        = s_motorCtrl.closedLoopBlend;
+  diag->state_time_ms            = s_motorCtrl.stateTimeMs;
+  diag->obs_lock_residual_rad    = s_motorCtrl.observerLockResidualRad;
+  diag->stall_div_count          = (uint16_t)s_motorCtrl.stallAngleDivCount;
+
+  /* Duty cycles: not cached in s_motorCtrl — report 0 unless extended.
+   * The FOC output is local to the ADC ISR. For duty telemetry, the
+   * caller can read directly from the eTMR hardware registers if needed,
+   * or we can extend the IRQ to cache last duties in s_motorCtrl. */
+  diag->duty_u = 0.0f;
+  diag->duty_v = 0.0f;
+  diag->duty_w = 0.0f;
+}

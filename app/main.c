@@ -19,6 +19,7 @@
 /* USER CODE BEGIN Includes */
 #include "motor_control.h"
 #include "motor_user_config.h"
+#include "can_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -174,6 +175,7 @@ int main(void)
     /* USER CODE BEGIN 2 */
     INT_SYS_ConfigInit();
     MotorControl_Init();
+    CanConfig_Init();
     MotorControl_SetControlMode((motor_control_mode_t)g_motorControlModeCmd);
     MotorControl_SetTargetIqA(g_motorIqCmdA);
     MotorControl_SetTargetRpm(g_motorSpeedCmdRpm);
@@ -189,6 +191,21 @@ int main(void)
         /* USER CODE BEGIN 3 */
         App_ProcessButtons();
         App_ProcessControlCommands();
+
+        /* CAN FD periodic task: TX scheduling + RX processing */
+        CanConfig_Task(MotorControl_GetTickMs());
+
+        /* Apply calibration parameters received via CAN */
+        if (CanConfig_IsCalibCommitted())
+        {
+            const can_calib_params_t *cal = CanConfig_GetCalibParams();
+            /* Update runtime globals that the motor control reads.
+             * A dedicated setter API would be cleaner, but for now
+             * the volatile globals serve as the bridge. */
+            g_motorSpeedCmdRpm = (float)MOTOR_CFG_DEFAULT_TARGET_RPM;
+            (void)cal;  /* TODO: Apply cal->speed_kp/ki etc. via dedicated API */
+            CanConfig_AckCalibApplied();
+        }
     }
     /* USER CODE END 3 */
 }

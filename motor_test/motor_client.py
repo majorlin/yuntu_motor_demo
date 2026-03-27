@@ -278,24 +278,52 @@ class MotorClient:
         self,
         target_rpm: float = 1000.0,
         timeout: float = 10.0,
+        resend_interval: float = 0.1,
         **kwargs,
     ) -> bool:
-        """Start motor and wait until closed-loop or fault."""
+        """Start motor and wait until closed-loop or fault.
+
+        Periodically resends the start command every *resend_interval* seconds
+        while the motor remains in STOP state, ensuring the firmware receives
+        the enable request even if it requires periodic heartbeat commands.
+        """
         self.start(target_rpm=target_rpm, **kwargs)
         deadline = time.monotonic() + timeout
+        last_send = time.monotonic()
         while time.monotonic() < deadline:
             st = self.state
             if st == MotorState.CLOSED_LOOP:
                 return True
             if st == MotorState.FAULT:
                 return False
+            # Resend command periodically while still in STOP
+            now = time.monotonic()
+            if st == MotorState.STOP and (now - last_send) >= resend_interval:
+                self.start(target_rpm=target_rpm, **kwargs)
+                last_send = now
             time.sleep(0.01)
         return False
 
-    def stop_and_wait(self, timeout: float = 5.0) -> bool:
-        """Stop motor and wait until STOP state."""
+    def stop_and_wait(self, timeout: float = 10.0, resend_interval: float = 0.5) -> bool:
+        """Stop motor and wait until STOP state.
+
+        Default timeout increased to 10s to accommodate high-inertia loads.
+        Periodically resends the stop command to ensure reliable shutdown.
+        """
         self.stop()
-        return self.can.wait_for_state(MotorState.STOP, timeout)
+        deadline = time.monotonic() + timeout
+        last_send = time.monotonic()
+        while time.monotonic() < deadline:
+            st = self.state
+            if st == MotorState.STOP:
+                return True
+            # Resend stop command periodically
+            now = time.monotonic()
+            if (now - last_send) >= resend_interval:
+                self.stop()
+                last_send = now
+            time.sleep(0.01)
+        return False
 
     def wait_speed_settled(
         self,

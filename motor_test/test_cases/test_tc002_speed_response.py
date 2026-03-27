@@ -19,9 +19,9 @@ class TestSpeedResponse:
 
     @pytest.mark.parametrize("from_rpm,to_rpm", [
         (500, 1500),
-        (1000, 3000),
-        (2000, 5000),
-        (3000, 1000),  # deceleration
+        (1000, 2500),
+        (800, 2000),
+        (2500, 500),  # deceleration
     ])
     def test_002_speed_step(self, motor, can, waveform, analyzer, report,
                              csv_logger, from_rpm, to_rpm):

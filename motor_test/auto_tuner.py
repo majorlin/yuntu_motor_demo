@@ -67,7 +67,7 @@ class AutoTuner:
         motor: MotorClient,
         waveform: WaveformCapture,
         analyzer: AnomalyAnalyzer,
-        output_dir: str = "test/test_records",
+        output_dir: str = "motor_test/test_records",
     ):
         self.can = can
         self.motor = motor

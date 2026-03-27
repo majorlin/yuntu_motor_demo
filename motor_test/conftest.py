@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-# Ensure test/ directory is on path for local imports
+# Ensure motor_test/ directory is on path for local imports
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 if TEST_DIR not in sys.path:
     sys.path.insert(0, TEST_DIR)

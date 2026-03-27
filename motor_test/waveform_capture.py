@@ -53,7 +53,7 @@ class WaveformRecord:
 class WaveformCapture:
     """Captures and analyzes motor control waveforms from CAN data."""
 
-    def __init__(self, can: CanInterface, output_dir: str = "test/test_records"):
+    def __init__(self, can: CanInterface, output_dir: str = "motor_test/test_records"):
         self.can = can
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)

@@ -54,7 +54,7 @@ class TestRecord:
 class ReportGenerator:
     """Generates comprehensive test reports in Markdown and HTML."""
 
-    def __init__(self, output_dir: str = "test/test_reports"):
+    def __init__(self, output_dir: str = "motor_test/test_reports"):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         self.records: List[TestRecord] = []
@@ -262,9 +262,9 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate test report from JSON records")
-    parser.add_argument("--input", type=str, default="test/test_records",
+    parser.add_argument("--input", type=str, default="motor_test/test_records",
                         help="Input directory with JSON test records")
-    parser.add_argument("--output", type=str, default="test/test_reports")
+    parser.add_argument("--output", type=str, default="motor_test/test_reports")
     args = parser.parse_args()
 
     gen = ReportGenerator(output_dir=args.output)

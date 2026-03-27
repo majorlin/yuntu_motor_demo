@@ -147,12 +147,12 @@
 #define MOTOR_CFG_VBUS_OVERVOLTAGE_V (18.0f)
 
 /* Startup timeout before declaring a fault, in milliseconds.
- * 鼓风机叶轮惯量大，开环锁定需要更多时间，放宽到 1.5s 给观测器更多收敛机会。 */
-#define MOTOR_CFG_STARTUP_TIMEOUT_MS (1500U)
+ * 鼓风机叶轮惯量大，开环锁定需要更多时间，放宽到 2.0s 给观测器更多收敛机会。 */
+#define MOTOR_CFG_STARTUP_TIMEOUT_MS (2000U)
 
 /* Allowed observer phase error during acquisition, in electrical radians.
- * 数据显示相位误差在开环阶段振荡导致锁定失败，放宽到 1.00 rad。 */
-#define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD (1.00f)
+ * 放宽到 1.20 rad 提高首次启动成功率，减少对 retry 的依赖。 */
+#define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD (1.20f)
 
 /* Observer phase error above this value counts as lost lock. */
 #define MOTOR_CFG_OBSERVER_LOSS_PHASE_ERR_RAD (1.20f)
@@ -233,8 +233,8 @@
  * 过高导致转速严重超调、来回振荡。需降低 Ki 防止积分器饱和,
  * 同时降低 Kp 减小比例环节冲击。
  */
-#define MOTOR_CFG_SPEED_KP (0.0030f)
-#define MOTOR_CFG_SPEED_KI (0.0060f)
+#define MOTOR_CFG_SPEED_KP (0.010250f)
+#define MOTOR_CFG_SPEED_KI (0.0010f)
 
 /* Runtime speed-command ramp to avoid large torque steps when changing rpm.
  * 鼓风机叶轮惯量大，过快斜坡容易产生过流，放缓到 600 RPM/s。 */
@@ -248,8 +248,9 @@
 /* D-axis current applied during alignment. */
 #define MOTOR_CFG_ALIGN_CURRENT_A (5.0f)
 
-/* Alignment duration in milliseconds. */
-#define MOTOR_CFG_ALIGN_TIME_MS (500U)
+/* Alignment duration in milliseconds.
+ * 缩短对齐时间，将更多 startup budget 留给开环 sweep。 */
+#define MOTOR_CFG_ALIGN_TIME_MS (300U)
 
 /* Open-loop q-axis current target. It ramps up from the alignment current
  * magnitude. 鼓风机负载力矩小，过大的开环电流导致闭环切换后积分器
@@ -269,8 +270,8 @@
  */
 
 /** @brief Maximum number of automatic startup retries before hard fault.
- * Set to 0 to disable retry (original timeout → fault behavior). */
-#define MOTOR_CFG_STARTUP_MAX_RETRIES (3U)
+ * 实机测试阶段禁用自动重试，启动失败直接报 FAULT 便于定位问题。 */
+#define MOTOR_CFG_STARTUP_MAX_RETRIES (0U)
 
 /** @brief Q-axis current increment per retry attempt (A).
  * Each retry adds this much Iq on top of the base open-loop current.
@@ -299,8 +300,8 @@
 #define MOTOR_CFG_ENABLE_WIND_DETECT (1U)
 
 /** @brief Wind detect observer settling timeout (ms).
- * 鼓风机叶轮惯量大，停机后仍可能高速旋转，给观察器更多收敛时间。 */
-#define MOTOR_CFG_WIND_DETECT_TIMEOUT_MS (500U)
+ * 快启停场景下缩短风检等待，停机后叶轮基本已减速。 */
+#define MOTOR_CFG_WIND_DETECT_TIMEOUT_MS (300U)
 
 /** @brief Mechanical RPM below which the rotor is treated as standstill during
  * wind detection. 实测表明 200 RPM 以上才能可靠捕获，设 150 RPM 留余量。 */

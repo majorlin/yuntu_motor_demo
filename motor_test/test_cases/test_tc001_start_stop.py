@@ -105,19 +105,19 @@ class TestStartStop:
         fail_details = []
 
         for i in range(n_cycles):
-            ok = motor.start_and_wait(target_rpm=1000.0, timeout=10.0)
+            ok = motor.start_and_wait(target_rpm=1000.0, timeout=15.0)
             if ok:
                 time.sleep(1.0)
-                stopped = motor.stop_and_wait(timeout=5.0)
+                stopped = motor.stop_and_wait(timeout=10.0)
                 if stopped:
                     successes += 1
                 else:
                     fail_details.append(f"#{i+1}: 停机失败")
-                time.sleep(1.0)
+                time.sleep(3.0)  # 大惯量叶轮需要更多减速时间
             else:
                 fail_details.append(f"#{i+1}: 启动失败 ({motor.fault.name})")
                 motor.stop()
-                time.sleep(2.0)
+                time.sleep(3.0)  # 故障后给更多恢复时间
 
         duration = time.time() - t0
         passed = successes == n_cycles

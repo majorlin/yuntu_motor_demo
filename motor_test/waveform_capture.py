@@ -38,6 +38,7 @@ class StepResponseMetrics:
     peak_value: float = 0.0
     final_value: float = 0.0
     initial_value: float = 0.0
+    motor_stalled: bool = False    # True if motor did not respond to step
 
 
 @dataclass
@@ -95,8 +96,15 @@ class WaveformCapture:
         post_s: float = 5.0,
         interval_s: float = 0.01,
         extra_signals: Optional[List[str]] = None,
+        expected_step: Optional[float] = None,
     ) -> Tuple[WaveformRecord, StepResponseMetrics]:
-        """Capture a step response: record pre→trigger→post, analyze."""
+        """Capture a step response: record pre→trigger→post, analyze.
+
+        Args:
+            expected_step: Expected step magnitude (e.g. to_rpm - from_rpm).
+                           Used for stall detection — if actual response is
+                           far smaller, metrics.motor_stalled will be True.
+        """
         all_signals = [signal_name]
         if extra_signals:
             all_signals.extend(extra_signals)
@@ -137,7 +145,8 @@ class WaveformCapture:
 
         # Analyze primary signal
         metrics = self.analyze_step_response(
-            timestamps, data[signal_name], step_time
+            timestamps, data[signal_name], step_time,
+            expected_step=expected_step,
         )
 
         return record, metrics
@@ -150,6 +159,7 @@ class WaveformCapture:
         values: List[float],
         step_time: float,
         tolerance_pct: float = 5.0,
+        expected_step: Optional[float] = None,
     ) -> StepResponseMetrics:
         """Analyze a step response curve."""
         t = np.array(time_s)
@@ -172,6 +182,17 @@ class WaveformCapture:
         step_size = final - initial
         if abs(step_size) < 1e-6:
             return StepResponseMetrics(initial_value=initial, final_value=final)
+
+        # Stall detection: if actual step is far smaller than expected,
+        # the motor did not respond (stalled / lost sync)
+        if expected_step is not None and abs(expected_step) > 1.0:
+            if abs(step_size) < abs(expected_step) * 0.05:
+                return StepResponseMetrics(
+                    initial_value=initial,
+                    final_value=final,
+                    steady_state_error_pct=100.0,
+                    motor_stalled=True,
+                )
 
         # Normalize
         y_norm = (post_y - initial) / step_size  # 0→1 for ideal step

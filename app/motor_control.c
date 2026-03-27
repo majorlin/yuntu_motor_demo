@@ -5,6 +5,7 @@
 
 #include "motor_control.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -18,11 +19,45 @@
 
 #define MOTOR_CTRL_DWT_LAR_KEY (0xC5ACCE55UL)
 #define MOTOR_CTRL_DWT_LAR (*((volatile uint32_t *)(DWT_BASE + 0xFB0UL)))
+#define MOTOR_CTRL_EPSILON_F (1.0e-6f)
+#define MOTOR_CTRL_HFI_MAX_CANDIDATES (8U)
+
+typedef enum {
+  MOTOR_HFI_PHASE_IDLE = 0,
+  MOTOR_HFI_PHASE_COARSE_SCAN,
+  MOTOR_HFI_PHASE_FINE_SCAN,
+  MOTOR_HFI_PHASE_POLARITY_POS,
+  MOTOR_HFI_PHASE_POLARITY_NEG,
+} motor_hfi_phase_t;
+
+typedef struct {
+  motor_hfi_phase_t phase;
+  bool command_valid;
+  int8_t command_sign;
+  uint8_t candidate_count;
+  uint8_t active_index;
+  uint16_t sample_count;
+  uint16_t sample_target;
+  float command_angle_rad;
+  float command_voltage_v;
+  float accum_metric;
+  float accum_abs_current;
+  float candidate_angles[MOTOR_CTRL_HFI_MAX_CANDIDATES];
+  float candidate_metrics[MOTOR_CTRL_HFI_MAX_CANDIDATES];
+  float coarse_step_rad;
+  float best_metric;
+  float best_angle_rad;
+  float scan_confidence;
+  float polarity_positive_metric;
+  float polarity_negative_metric;
+} motor_hfi_ipd_ctx_t;
 
 typedef struct {
   motor_status_t status;
   motor_foc_state_t foc;
   bool enableRequest;
+  bool angleMonitorRequest;
+  bool angleMonitorSeeded;
   bool fastLoopRunning;
   bool outputsUnmasked;
   uint16_t offsetSampleCount;
@@ -38,6 +73,8 @@ typedef struct {
   uint32_t observerLossCount;
   float openLoopAngleRad;
   float openLoopSpeedRadS;
+  float openLoopFilteredCurrentA;
+  float angleMonitorBemfAngleRad;
   float closedLoopBlend;
   float latestPhaseErrorRad;
   float latestObserverAngleRad;
@@ -80,6 +117,10 @@ typedef struct {
 
   /* Parameter identification */
   bool paramIdentRequested; /* Trigger flag for param ident after offset cal */
+
+  /* HFI / initial position detection */
+  motor_hfi_ipd_ctx_t hfi;
+  float hfiInitialAngleRad;
 } motor_control_ctx_t;
 
 static motor_control_ctx_t s_motorCtrl;
@@ -102,6 +143,58 @@ static float MotorControl_Clamp(float value, float minValue, float maxValue) {
   }
 
   return result;
+}
+
+/**
+ * @brief Fast floating-point absolute value helper.
+ * @param value Input value.
+ * @return Absolute value.
+ */
+static inline float MotorControl_FastAbs(float value) {
+  return __builtin_fabsf(value);
+}
+
+/**
+ * @brief Fast non-negative square root helper.
+ * @param value Input value.
+ * @return Square root with negative inputs clamped to zero.
+ */
+static inline float MotorControl_FastSqrt(float value) {
+  float safeValue = value;
+
+  if (safeValue < 0.0f) {
+    safeValue = 0.0f;
+  }
+
+  return __builtin_sqrtf(safeValue);
+}
+
+/**
+ * @brief Lightweight atan2 approximation for ISR-side BEMF angle monitoring.
+ * @param y Beta-axis component.
+ * @param x Alpha-axis component.
+ * @return Angle in radians [-pi, pi].
+ */
+static float MotorControl_FastAtan2(float y, float x) {
+  const float quarterPi = 0.78539816339744830962f;
+  const float threeQuarterPi = 2.35619449019234492885f;
+  const float absY = MotorControl_FastAbs(y) + MOTOR_CTRL_EPSILON_F;
+  float angle;
+  float ratio;
+
+  if (x >= 0.0f) {
+    ratio = (x - absY) / (x + absY);
+    angle = quarterPi - (quarterPi * ratio);
+  } else {
+    ratio = (x + absY) / (absY - x);
+    angle = threeQuarterPi - (quarterPi * ratio);
+  }
+
+  if (y < 0.0f) {
+    angle = -angle;
+  }
+
+  return angle;
 }
 
 /**
@@ -209,12 +302,118 @@ static float MotorControl_WrapAngleSigned(float angleRad) {
 }
 
 /**
+ * @brief Wrap an angle into the saliency-symmetric range [0, pi).
+ * @param angleRad Input angle.
+ * @return Wrapped angle in [0, pi).
+ */
+static float MotorControl_WrapAngle0ToPi(float angleRad) {
+  float wrappedAngle = MotorFoc_WrapAngle0ToTwoPi(angleRad);
+
+  if (wrappedAngle >= MOTOR_CFG_PI_F) {
+    wrappedAngle -= MOTOR_CFG_PI_F;
+  }
+
+  return wrappedAngle;
+}
+
+/**
+ * @brief Max helper for three floats.
+ * @return Maximum of a, b and c.
+ */
+static float MotorControl_Max3(float a, float b, float c) {
+  float result = a;
+
+  if (b > result) {
+    result = b;
+  }
+  if (c > result) {
+    result = c;
+  }
+
+  return result;
+}
+
+/**
+ * @brief Min helper for three floats.
+ * @return Minimum of a, b and c.
+ */
+static float MotorControl_Min3(float a, float b, float c) {
+  float result = a;
+
+  if (b < result) {
+    result = b;
+  }
+  if (c < result) {
+    result = c;
+  }
+
+  return result;
+}
+
+/**
+ * @brief Clarke transform for HFI / startup helper paths.
+ * @param ia Phase-A current.
+ * @param ib Phase-B current.
+ * @param ic Phase-C current.
+ * @param iab Output alpha-beta current vector.
+ */
+static void MotorControl_Clarke(float ia, float ib, float ic,
+                                motor_ab_frame_t *iab) {
+  (void)ic;
+  iab->alpha = ia;
+  iab->beta = (ia + ib + ib) * MOTOR_CFG_INV_SQRT3_F;
+}
+
+/**
+ * @brief Project an alpha-beta current vector onto a test angle.
+ * @param iab Alpha-beta current vector.
+ * @param angleRad Projection angle.
+ * @return Current component along the projection angle.
+ */
+static float MotorControl_ProjectAlongAngle(const motor_ab_frame_t *iab,
+                                            float angleRad) {
+  return (iab->alpha * __builtin_cosf(angleRad)) +
+         (iab->beta * __builtin_sinf(angleRad));
+}
+
+/**
+ * @brief Convert a stationary-frame voltage vector to duty cycles.
+ * @param angleRad Target vector angle in radians.
+ * @param magnitudeV Target voltage magnitude in volts.
+ * @param busVoltageV Available DC bus voltage in volts.
+ */
+static void MotorControl_ApplyVoltageVector(float angleRad, float magnitudeV,
+                                            float busVoltageV) {
+  const float busClampedV = MotorControl_Clamp(busVoltageV, 1.0f, 1000.0f);
+  const float maxVoltageV = busClampedV * MOTOR_CFG_SVM_MAX_MODULATION;
+  const float limitedMagnitudeV =
+      MotorControl_Clamp(magnitudeV, -maxVoltageV, maxVoltageV);
+  const float vabAlpha = limitedMagnitudeV * __builtin_cosf(angleRad);
+  const float vabBeta = limitedMagnitudeV * __builtin_sinf(angleRad);
+  const float inverseBus = 1.0f / busClampedV;
+  const float phaseU = vabAlpha * inverseBus;
+  const float phaseV =
+      ((-0.5f * vabAlpha) + (MOTOR_CFG_SQRT3_BY_2_F * vabBeta)) * inverseBus;
+  const float phaseW =
+      ((-0.5f * vabAlpha) - (MOTOR_CFG_SQRT3_BY_2_F * vabBeta)) * inverseBus;
+  const float phaseMax = MotorControl_Max3(phaseU, phaseV, phaseW);
+  const float phaseMin = MotorControl_Min3(phaseU, phaseV, phaseW);
+  const float offset = 0.5f - (0.5f * (phaseMax + phaseMin));
+  const float dutyU = MotorControl_Clamp(phaseU + offset, 0.0f, 1.0f);
+  const float dutyV = MotorControl_Clamp(phaseV + offset, 0.0f, 1.0f);
+  const float dutyW = MotorControl_Clamp(phaseW + offset, 0.0f, 1.0f);
+
+  MotorHwYtm32_ApplyPhaseDuty(dutyU, dutyV, dutyW);
+}
+
+/**
  * @brief Transition to a new motor control state.
  * @param nextState The state to transition to.
  */
 static void MotorControl_SetState(motor_control_state_t nextState) {
   s_motorCtrl.status.state = nextState;
   s_motorCtrl.stateTimeMs = 0U;
+  s_motorCtrl.status.hfi_active = (nextState == MOTOR_STATE_HFI_IPD);
 }
 
 
@@ -234,11 +433,257 @@ static float MotorControl_GetSignedDirection(void) {
 static inline float MotorControl_GetAlignAngle(void) {
   float angleRad = MOTOR_CFG_ALIGN_ANGLE_RAD;
 
+  if (s_motorCtrl.status.hfi_used && s_motorCtrl.status.hfi_angle_valid) {
+    angleRad = s_motorCtrl.hfiInitialAngleRad;
+  }
+
   if (s_motorCtrl.status.direction < 0) {
     angleRad += MOTOR_CFG_PI_F;
   }
 
   return MotorFoc_WrapAngle0ToTwoPi(angleRad);
+}
+
+/**
+ * @brief Read the active alignment current, honoring CAN calibration overrides.
+ * @return Alignment d-axis current in amperes.
+ */
+static float MotorControl_GetConfiguredAlignCurrentA(void) {
+  float alignCurrentA = MOTOR_CFG_ALIGN_CURRENT_A;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->align_current_a > 0.0f)) {
+    alignCurrentA = calib->align_current_a;
+  }
+
+  return MotorControl_Clamp(alignCurrentA, 0.0f, MOTOR_CFG_MAX_IQ_A);
+}
+
+/**
+ * @brief Read the active open-loop startup current limit.
+ * @return Open-loop q-axis current limit in amperes.
+ */
+static float MotorControl_GetConfiguredOpenLoopIqA(void) {
+  float openLoopIqA = MOTOR_CFG_OPEN_LOOP_IQ_A;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->open_loop_iq_a > 0.0f)) {
+    openLoopIqA = calib->open_loop_iq_a;
+  }
+
+  return MotorControl_Clamp(openLoopIqA, 0.0f, MOTOR_CFG_MAX_IQ_A);
+}
+
+/**
+ * @brief Alignment current target including retry boost.
+ * @return Target d-axis current in amperes.
+ */
+static float MotorControl_GetAlignCurrentTargetA(void) {
+  return MotorControl_Clamp(
+      MotorControl_GetConfiguredAlignCurrentA() +
+          (s_motorCtrl.startupIqBoostA * 0.5f),
+      0.0f, MOTOR_CFG_MAX_IQ_A);
+}
+
+/**
+ * @brief Startup q-axis current limit including retry boost.
+ * @return Target startup q-axis current magnitude in amperes.
+ */
+static float MotorControl_GetStartupIqLimitA(void) {
+  return MotorControl_Clamp(
+      MotorControl_GetConfiguredOpenLoopIqA() + s_motorCtrl.startupIqBoostA,
+      0.0f, MOTOR_CFG_MAX_IQ_A);
+}
+
+/**
+ * @brief Magnitude of the measured dq startup current vector.
+ * @return Current magnitude in amperes.
+ */
+static float MotorControl_GetStartupCurrentMagnitudeA(void) {
+  return __builtin_sqrtf((s_motorCtrl.status.id_a * s_motorCtrl.status.id_a) +
+                         (s_motorCtrl.status.iq_a * s_motorCtrl.status.iq_a));
+}
+
+/**
+ * @brief Read whether the HFI/IPD pre-positioning path is enabled.
+ * @return True if static HFI/IPD should be attempted.
+ */
+static bool MotorControl_IsHfiEnabled(void) {
+  bool enabled = (MOTOR_CFG_ENABLE_HFI_IPD != 0U);
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if (calib != NULL) {
+    enabled = calib->hfi_enable;
+  }
+
+  return enabled;
+}
+
+/**
+ * @brief Read the configured bipolar HFI burst amplitude.
+ * @param busVoltageV Present DC bus voltage in volts.
+ * @return Clamped injection voltage magnitude in volts.
+ */
+static float MotorControl_GetConfiguredHfiInjectVoltageV(float busVoltageV) {
+  float injectVoltageV = MOTOR_CFG_HFI_IPD_INJECT_V;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->hfi_inject_voltage_v > 0.0f)) {
+    injectVoltageV = calib->hfi_inject_voltage_v;
+  }
+
+  return MotorControl_Clamp(
+      injectVoltageV, 0.1f,
+      MotorControl_Clamp(busVoltageV, 1.0f, 1000.0f) *
+          MOTOR_CFG_SVM_MAX_MODULATION * 0.8f);
+}
+
+/**
+ * @brief Read the configured polarity pulse amplitude.
+ * @param busVoltageV Present DC bus voltage in volts.
+ * @return Clamped polarity pulse voltage in volts.
+ */
+static float MotorControl_GetConfiguredHfiPolarityVoltageV(float busVoltageV) {
+  float polarityVoltageV = MOTOR_CFG_HFI_IPD_POLARITY_V;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->hfi_polarity_voltage_v > 0.0f)) {
+    polarityVoltageV = calib->hfi_polarity_voltage_v;
+  }
+
+  return MotorControl_Clamp(
+      polarityVoltageV, 0.1f,
+      MotorControl_Clamp(busVoltageV, 1.0f, 1000.0f) *
+          MOTOR_CFG_SVM_MAX_MODULATION * 0.8f);
+}
+
+/**
+ * @brief Read the configured HFI pulse pair count.
+ * @return Pulse pair count per candidate.
+ */
+static uint8_t MotorControl_GetConfiguredHfiPulsePairs(void) {
+  uint8_t pulsePairs = MOTOR_CFG_HFI_IPD_PULSE_PAIRS;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->hfi_pulse_pairs > 0U)) {
+    pulsePairs = calib->hfi_pulse_pairs;
+  }
+
+  if (pulsePairs > 32U) {
+    pulsePairs = 32U;
+  }
+
+  return (pulsePairs == 0U) ? 1U : pulsePairs;
+}
+
+/**
+ * @brief Read the configured number of coarse HFI candidates.
+ * @return Candidate count over [0, pi).
+ */
+static uint8_t MotorControl_GetConfiguredHfiCandidateCount(void) {
+  uint8_t candidateCount = MOTOR_CFG_HFI_IPD_CANDIDATE_COUNT;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->hfi_candidate_count > 0U)) {
+    candidateCount = calib->hfi_candidate_count;
+  }
+
+  if (candidateCount < 3U) {
+    candidateCount = 3U;
+  } else if (candidateCount > MOTOR_CTRL_HFI_MAX_CANDIDATES) {
+    candidateCount = MOTOR_CTRL_HFI_MAX_CANDIDATES;
+  }
+
+  return candidateCount;
+}
+
+/**
+ * @brief Read the configured HFI confidence threshold.
+ * @return Confidence threshold in [0, 1].
+ */
+static float MotorControl_GetConfiguredHfiConfidenceMin(void) {
+  float confidenceMin = MOTOR_CFG_HFI_IPD_CONFIDENCE_MIN;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->hfi_confidence_threshold > 0.0f)) {
+    confidenceMin = calib->hfi_confidence_threshold;
+  }
+
+  return MotorControl_Clamp(confidenceMin, 0.01f, 1.0f);
+}
+
+/**
+ * @brief Read the configured polarity pulse count.
+ * @return Number of positive polarity pulse samples.
+ */
+static uint8_t MotorControl_GetConfiguredHfiPolarityPulseCount(void) {
+  uint8_t pulseCount = MOTOR_CFG_HFI_IPD_POLARITY_PULSES;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->hfi_polarity_pulse_count > 0U)) {
+    pulseCount = calib->hfi_polarity_pulse_count;
+  }
+
+  if (pulseCount > 32U) {
+    pulseCount = 32U;
+  }
+
+  return (pulseCount == 0U) ? 1U : pulseCount;
+}
+
+/**
+ * @brief Read the short align hold duration after HFI success.
+ * @return Align hold in milliseconds.
+ */
+static uint16_t MotorControl_GetConfiguredHfiAlignHoldMs(void) {
+  uint16_t alignHoldMs = MOTOR_CFG_HFI_IPD_ALIGN_HOLD_MS;
+  const can_calib_params_t *calib = CanConfig_GetCalibParams();
+
+  if ((calib != NULL) && (calib->hfi_align_hold_ms > 0U)) {
+    alignHoldMs = calib->hfi_align_hold_ms;
+  }
+
+  return alignHoldMs;
+}
+
+/**
+ * @brief Return the active align-state dwell time.
+ * @return Align dwell time in milliseconds.
+ */
+static uint16_t MotorControl_GetAlignHoldTimeMs(void) {
+  if (s_motorCtrl.status.hfi_used && s_motorCtrl.status.hfi_angle_valid) {
+    return MotorControl_GetConfiguredHfiAlignHoldMs();
+  }
+
+  return MOTOR_CFG_ALIGN_TIME_MS;
+}
+
+/**
+ * @brief Clear HFI/IPD runtime status and context.
+ */
+static void MotorControl_ResetHfiStatus(void) {
+  (void)memset(&s_motorCtrl.hfi, 0, sizeof(s_motorCtrl.hfi));
+  s_motorCtrl.hfiInitialAngleRad = 0.0f;
+  s_motorCtrl.status.hfi_active = false;
+  s_motorCtrl.status.hfi_angle_valid = false;
+  s_motorCtrl.status.hfi_used = false;
+  s_motorCtrl.status.hfi_fallback_reason = MOTOR_HFI_FALLBACK_NONE;
+  s_motorCtrl.status.hfi_angle_rad = 0.0f;
+  s_motorCtrl.status.hfi_confidence = 0.0f;
+  s_motorCtrl.status.hfi_ripple_metric = 0.0f;
+}
+
+/**
+ * @brief Reset passive BEMF angle-monitor telemetry fields.
+ */
+static void MotorControl_ResetAngleMonitorStatus(void) {
+  s_motorCtrl.angleMonitorSeeded = false;
+  s_motorCtrl.angleMonitorBemfAngleRad = 0.0f;
+  s_motorCtrl.status.angle_monitor_active = false;
+  s_motorCtrl.status.angle_monitor_valid = false;
+  s_motorCtrl.status.angle_monitor_angle_rad = 0.0f;
+  s_motorCtrl.status.angle_monitor_speed_rad_s = 0.0f;
+  s_motorCtrl.status.angle_monitor_bemf_mag = 0U;
 }
 
 /**
@@ -293,6 +738,8 @@ static void MotorControl_ResetRuntime(void) {
   s_motorCtrl.observerLockResidualRad = 0.0f;
   s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
   s_motorCtrl.openLoopSpeedRadS = 0.0f;
+  s_motorCtrl.openLoopFilteredCurrentA = 0.0f;
+  s_motorCtrl.angleMonitorBemfAngleRad = 0.0f;
   s_motorCtrl.windDetectSpeedRadS = 0.0f;
   s_motorCtrl.windDetectPrevSpeedRadS = 0.0f;
   s_motorCtrl.windDetectDirection = 0;
@@ -301,6 +748,8 @@ static void MotorControl_ResetRuntime(void) {
   s_motorCtrl.fwIdTargetA = 0.0f;
   s_motorCtrl.voltageModulationRatio = 0.0f;
   s_motorCtrl.stallAngleDivCount = 0U;
+  MotorControl_ResetHfiStatus();
+  MotorControl_ResetAngleMonitorStatus();
   /* NOTE: startupRetryCount and startupIqBoostA are NOT reset here —
    * they must persist across retry attempts within a single enable cycle.
    * They are only cleared in MotorControl_EnterStop(). */
@@ -313,6 +762,10 @@ static void MotorControl_ResetRuntime(void) {
  */
 static void MotorControl_EnterStop(void) {
   MotorHwYtm32_DisableFastLoopSampling();
+  if ((s_motorCtrl.status.state == MOTOR_STATE_WIND_DETECT) ||
+      (s_motorCtrl.status.state == MOTOR_STATE_ANGLE_MONITOR)) {
+    MotorHwYtm32_SwitchAdcToCurrentSensing();
+  }
   MotorHwYtm32_SetOutputsMasked(true);
   MotorControl_ResetRuntime();
   /* Full stop: clear retry state — next enable starts fresh */
@@ -374,6 +827,28 @@ static void MotorControl_BeginOffsetCalibration(void) {
 }
 
 /**
+ * @brief Enter passive BEMF angle-monitor mode with outputs masked.
+ */
+static void MotorControl_StartAngleMonitor(void) {
+  MotorHwYtm32_DisableFastLoopSampling();
+  MotorHwYtm32_SetOutputsMasked(true);
+  MotorControl_ResetRuntime();
+  s_motorCtrl.status.id_target_a = 0.0f;
+  s_motorCtrl.status.iq_target_a = 0.0f;
+  s_motorCtrl.status.id_a = 0.0f;
+  s_motorCtrl.status.iq_a = 0.0f;
+  s_motorCtrl.status.electrical_speed_rad_s = 0.0f;
+  s_motorCtrl.status.mechanical_rpm = 0.0f;
+  s_motorCtrl.status.observer_locked = false;
+  s_motorCtrl.status.angle_monitor_active = true;
+  s_motorCtrl.fastLoopRunning = true;
+  MotorHwYtm32_SwitchAdcToBemfSensing();
+  MotorHwYtm32_EnableFastLoopSampling();
+  MotorHwYtm32_SetOutputsMasked(true);
+  MotorControl_SetState(MOTOR_STATE_ANGLE_MONITOR);
+}
+
+/**
  * @brief Transition step to Align mode injecting pure DC current.
  */
 static void MotorControl_StartAlign(void) {
@@ -392,14 +867,409 @@ static void MotorControl_StartAlign(void) {
   s_motorCtrl.observerLossCount = 0U;
   s_motorCtrl.stallAngleDivCount = 0U;
   s_motorCtrl.startupTimeMs = 0U;
-  /* Apply alignment current with retry boost: increase Id slightly on retries
-   * to strengthen rotor locking before open-loop sweep begins. */
-  s_motorCtrl.status.id_target_a =
-      MOTOR_CFG_ALIGN_CURRENT_A + (s_motorCtrl.startupIqBoostA * 0.5f);
+  s_motorCtrl.openLoopFilteredCurrentA = 0.0f;
+  /* ALIGN now ramps the d-axis current up over a short interval instead of
+   * stepping straight to the full locking current. This reduces current shock
+   * while keeping the rotor clamped before I/F startup begins. */
+  s_motorCtrl.status.id_target_a = 0.0f;
   s_motorCtrl.status.iq_target_a = 0.0f;
+  s_motorCtrl.status.electrical_angle_rad = MotorControl_GetAlignAngle();
+  s_motorCtrl.status.electrical_speed_rad_s = 0.0f;
+  s_motorCtrl.status.mechanical_rpm = 0.0f;
   s_motorCtrl.status.observer_locked = false;
   s_motorCtrl.fastLoopRunning = true;
   MotorControl_SetState(MOTOR_STATE_ALIGN);
+}
+
+/**
+ * @brief Load one HFI candidate and reset the synchronous demod accumulators.
+ * @param candidateIndex Candidate slot to activate.
+ * @param voltageV Voltage amplitude for the active HFI phase.
+ * @param sampleTarget Number of measured pulse responses required.
+ */
+static void MotorControl_HfiLoadCandidate(uint8_t candidateIndex, float voltageV,
+                                          uint16_t sampleTarget) {
+  s_motorCtrl.hfi.active_index = candidateIndex;
+  s_motorCtrl.hfi.sample_count = 0U;
+  s_motorCtrl.hfi.sample_target = sampleTarget;
+  s_motorCtrl.hfi.accum_metric = 0.0f;
+  s_motorCtrl.hfi.accum_abs_current = 0.0f;
+  s_motorCtrl.hfi.command_valid = false;
+  s_motorCtrl.hfi.command_sign = 1;
+  s_motorCtrl.hfi.command_voltage_v = voltageV;
+  s_motorCtrl.hfi.command_angle_rad =
+      s_motorCtrl.hfi.candidate_angles[candidateIndex];
+  s_motorCtrl.status.hfi_angle_rad = s_motorCtrl.hfi.command_angle_rad;
+}
+
+/**
+ * @brief Begin the fine HFI scan around the best coarse candidate.
+ * @param centerAngleRad Best coarse candidate angle.
+ * @param injectVoltageV Bipolar HFI burst amplitude.
+ */
+static void MotorControl_HfiStartFineScan(float centerAngleRad,
+                                          float injectVoltageV) {
+  const float fineStep = s_motorCtrl.hfi.coarse_step_rad * 0.5f;
+
+  s_motorCtrl.hfi.phase = MOTOR_HFI_PHASE_FINE_SCAN;
+  s_motorCtrl.hfi.candidate_count = 3U;
+  s_motorCtrl.hfi.candidate_angles[0] =
+      MotorControl_WrapAngle0ToPi(centerAngleRad - fineStep);
+  s_motorCtrl.hfi.candidate_angles[1] =
+      MotorControl_WrapAngle0ToPi(centerAngleRad);
+  s_motorCtrl.hfi.candidate_angles[2] =
+      MotorControl_WrapAngle0ToPi(centerAngleRad + fineStep);
+  s_motorCtrl.hfi.candidate_metrics[0] = 0.0f;
+  s_motorCtrl.hfi.candidate_metrics[1] = 0.0f;
+  s_motorCtrl.hfi.candidate_metrics[2] = 0.0f;
+  MotorControl_HfiLoadCandidate(
+      0U, injectVoltageV,
+      (uint16_t)(MotorControl_GetConfiguredHfiPulsePairs() * 2U));
+}
+
+/**
+ * @brief Begin one polarity comparison burst.
+ * @param positiveHalfTurn True to test the saliency angle, false for +pi.
+ * @param polarityVoltageV Positive polarity pulse amplitude.
+ */
+static void MotorControl_HfiStartPolarityBurst(bool positiveHalfTurn,
+                                               float polarityVoltageV) {
+  s_motorCtrl.hfi.phase = positiveHalfTurn ? MOTOR_HFI_PHASE_POLARITY_POS
+                                           : MOTOR_HFI_PHASE_POLARITY_NEG;
+  s_motorCtrl.hfi.candidate_count = 1U;
+  s_motorCtrl.hfi.candidate_angles[0] = positiveHalfTurn
+                                            ? s_motorCtrl.hfi.best_angle_rad
+                                            : MotorFoc_WrapAngle0ToTwoPi(
+                                                  s_motorCtrl.hfi.best_angle_rad +
+                                                  MOTOR_CFG_PI_F);
+  MotorControl_HfiLoadCandidate(
+      0U, polarityVoltageV,
+      MotorControl_GetConfiguredHfiPolarityPulseCount());
+}
+
+/**
+ * @brief Finish HFI/IPD and hand off to the regular ALIGN state.
+ * @param success True when a valid initial angle was found.
+ * @param reason Fallback reason recorded on failure.
+ * @param finalConfidence Final confidence metric to expose via telemetry.
+ */
+static void MotorControl_HfiFinishToAlign(bool success,
+                                          motor_hfi_fallback_reason_t reason,
+                                          float finalConfidence) {
+  MotorHwYtm32_SetOutputsMasked(true);
+  s_motorCtrl.outputsUnmasked = false;
+  MotorHwYtm32_ApplyPhaseDuty(0.5f, 0.5f, 0.5f);
+
+  s_motorCtrl.hfi.phase = MOTOR_HFI_PHASE_IDLE;
+  s_motorCtrl.hfi.command_valid = false;
+  s_motorCtrl.status.hfi_active = false;
+  s_motorCtrl.status.hfi_confidence = finalConfidence;
+  s_motorCtrl.status.hfi_ripple_metric = s_motorCtrl.hfi.best_metric;
+
+  if (success) {
+    s_motorCtrl.hfiInitialAngleRad =
+        MotorFoc_WrapAngle0ToTwoPi(s_motorCtrl.hfi.best_angle_rad);
+    s_motorCtrl.status.hfi_angle_valid = true;
+    s_motorCtrl.status.hfi_used = true;
+    s_motorCtrl.status.hfi_fallback_reason = MOTOR_HFI_FALLBACK_NONE;
+    s_motorCtrl.status.hfi_angle_rad = s_motorCtrl.hfiInitialAngleRad;
+    s_motorCtrl.status.electrical_angle_rad = s_motorCtrl.hfiInitialAngleRad;
+  } else {
+    s_motorCtrl.hfiInitialAngleRad = 0.0f;
+    s_motorCtrl.status.hfi_angle_valid = false;
+    s_motorCtrl.status.hfi_used = false;
+    s_motorCtrl.status.hfi_fallback_reason = (uint8_t)reason;
+  }
+
+  MotorControl_StartAlign();
+}
+
+/**
+ * @brief Evaluate the current HFI scan phase and advance to the next step.
+ * @param injectVoltageV Bipolar scan voltage.
+ * @param polarityVoltageV Polarity pulse voltage.
+ */
+static void MotorControl_HfiAdvancePhase(float injectVoltageV,
+                                         float polarityVoltageV) {
+  uint8_t bestIndex = 0U;
+  float bestMetric = s_motorCtrl.hfi.candidate_metrics[0];
+  float worstMetric = s_motorCtrl.hfi.candidate_metrics[0];
+  float secondMetric = 0.0f;
+  float confidence;
+  float repeatability;
+  float confidenceMin = MotorControl_GetConfiguredHfiConfidenceMin();
+  uint8_t i;
+
+  for (i = 1U; i < s_motorCtrl.hfi.candidate_count; i++) {
+    const float metric = s_motorCtrl.hfi.candidate_metrics[i];
+
+    if (metric > bestMetric) {
+      secondMetric = bestMetric;
+      bestMetric = metric;
+      bestIndex = i;
+    } else if (metric > secondMetric) {
+      secondMetric = metric;
+    }
+
+    if (metric < worstMetric) {
+      worstMetric = metric;
+    }
+  }
+
+  confidence = (bestMetric - worstMetric) /
+               ((bestMetric > MOTOR_CTRL_EPSILON_F) ? bestMetric
+                                                    : MOTOR_CTRL_EPSILON_F);
+
+  if (s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_COARSE_SCAN) {
+    s_motorCtrl.hfi.best_metric = bestMetric;
+    s_motorCtrl.hfi.best_angle_rad =
+        s_motorCtrl.hfi.candidate_angles[bestIndex];
+    s_motorCtrl.hfi.scan_confidence = confidence;
+    s_motorCtrl.status.hfi_confidence = confidence;
+    s_motorCtrl.status.hfi_ripple_metric = bestMetric;
+    s_motorCtrl.status.hfi_angle_rad = s_motorCtrl.hfi.best_angle_rad;
+
+    if (confidence < confidenceMin) {
+      MotorControl_HfiFinishToAlign(false, MOTOR_HFI_FALLBACK_LOW_CONFIDENCE,
+                                    confidence);
+      return;
+    }
+
+    MotorControl_HfiStartFineScan(s_motorCtrl.hfi.best_angle_rad,
+                                  injectVoltageV);
+    return;
+  }
+
+  if (s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_FINE_SCAN) {
+    s_motorCtrl.hfi.best_metric = bestMetric;
+    s_motorCtrl.hfi.best_angle_rad =
+        s_motorCtrl.hfi.candidate_angles[bestIndex];
+    s_motorCtrl.hfi.scan_confidence = confidence;
+    s_motorCtrl.status.hfi_confidence = confidence;
+    s_motorCtrl.status.hfi_ripple_metric = bestMetric;
+    s_motorCtrl.status.hfi_angle_rad = s_motorCtrl.hfi.best_angle_rad;
+
+    if (confidence < confidenceMin) {
+      MotorControl_HfiFinishToAlign(false, MOTOR_HFI_FALLBACK_LOW_CONFIDENCE,
+                                    confidence);
+      return;
+    }
+
+    repeatability =
+        (bestMetric - secondMetric) /
+        ((bestMetric > MOTOR_CTRL_EPSILON_F) ? bestMetric
+                                             : MOTOR_CTRL_EPSILON_F);
+    if (repeatability < MotorControl_Clamp(confidenceMin * 0.5f, 0.05f, 1.0f)) {
+      MotorControl_HfiFinishToAlign(false, MOTOR_HFI_FALLBACK_LOW_REPEATABILITY,
+                                    confidence);
+      return;
+    }
+
+    MotorControl_HfiStartPolarityBurst(true, polarityVoltageV);
+    return;
+  }
+
+  if (s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_POLARITY_POS) {
+    s_motorCtrl.hfi.polarity_positive_metric = bestMetric;
+    MotorControl_HfiStartPolarityBurst(false, polarityVoltageV);
+    return;
+  }
+
+  s_motorCtrl.hfi.polarity_negative_metric = bestMetric;
+  confidence =
+      MotorControl_FastAbs(s_motorCtrl.hfi.polarity_positive_metric -
+                           s_motorCtrl.hfi.polarity_negative_metric) /
+      MotorControl_Clamp(
+          (s_motorCtrl.hfi.polarity_positive_metric >
+                   s_motorCtrl.hfi.polarity_negative_metric
+               ? s_motorCtrl.hfi.polarity_positive_metric
+               : s_motorCtrl.hfi.polarity_negative_metric),
+          MOTOR_CTRL_EPSILON_F, 1.0e6f);
+
+  if (confidence < MotorControl_Clamp(confidenceMin * 0.5f, 0.05f, 1.0f)) {
+    MotorControl_HfiFinishToAlign(false,
+                                  MOTOR_HFI_FALLBACK_POLARITY_AMBIGUOUS,
+                                  confidence);
+    return;
+  }
+
+  if (s_motorCtrl.hfi.polarity_negative_metric >
+      s_motorCtrl.hfi.polarity_positive_metric) {
+    s_motorCtrl.hfi.best_angle_rad = MotorFoc_WrapAngle0ToTwoPi(
+        s_motorCtrl.hfi.best_angle_rad + MOTOR_CFG_PI_F);
+  } else {
+    s_motorCtrl.hfi.best_angle_rad =
+        MotorFoc_WrapAngle0ToTwoPi(s_motorCtrl.hfi.best_angle_rad);
+  }
+
+  if (confidence < s_motorCtrl.hfi.scan_confidence) {
+    s_motorCtrl.hfi.scan_confidence = confidence;
+  }
+
+  MotorControl_HfiFinishToAlign(true, MOTOR_HFI_FALLBACK_NONE,
+                                s_motorCtrl.hfi.scan_confidence);
+}
+
+/**
+ * @brief Execute one fast-loop HFI/IPD iteration.
+ * @param iab Measured phase currents in alpha-beta frame.
+ */
+static void MotorControl_RunHfiIpdFastLoop(const motor_ab_frame_t *iab) {
+  float projectedCurrentA = 0.0f;
+  float orthogonalCurrentA = 0.0f;
+  const float injectVoltageV =
+      MotorControl_GetConfiguredHfiInjectVoltageV(s_motorCtrl.status.bus_voltage_v);
+  const float polarityVoltageV = MotorControl_GetConfiguredHfiPolarityVoltageV(
+      s_motorCtrl.status.bus_voltage_v);
+
+  if (s_motorCtrl.hfi.command_valid) {
+    projectedCurrentA =
+        MotorControl_ProjectAlongAngle(iab, s_motorCtrl.hfi.command_angle_rad);
+    orthogonalCurrentA = MotorControl_ProjectAlongAngle(
+        iab, s_motorCtrl.hfi.command_angle_rad + MOTOR_CFG_HALF_PI_F);
+
+    if ((s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_COARSE_SCAN) ||
+        (s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_FINE_SCAN)) {
+      s_motorCtrl.hfi.accum_metric +=
+          (float)s_motorCtrl.hfi.command_sign * projectedCurrentA;
+    } else {
+      s_motorCtrl.hfi.accum_metric += projectedCurrentA;
+    }
+
+    s_motorCtrl.hfi.accum_abs_current += MotorControl_FastAbs(projectedCurrentA);
+    s_motorCtrl.hfi.sample_count++;
+    s_motorCtrl.status.id_a = projectedCurrentA;
+    s_motorCtrl.status.iq_a = orthogonalCurrentA;
+    s_motorCtrl.status.electrical_speed_rad_s = 0.0f;
+    s_motorCtrl.status.mechanical_rpm = 0.0f;
+    s_motorCtrl.status.electrical_angle_rad = s_motorCtrl.hfi.command_angle_rad;
+    s_motorCtrl.status.observer_locked = false;
+    CanConfig_WaveformSample(
+        s_motorCtrl.status.phase_current_a, s_motorCtrl.status.phase_current_b,
+        s_motorCtrl.status.phase_current_c, s_motorCtrl.status.bus_voltage_v,
+        projectedCurrentA, orthogonalCurrentA, s_motorCtrl.hfi.command_angle_rad);
+  }
+
+  if (s_motorCtrl.hfi.sample_count >= s_motorCtrl.hfi.sample_target) {
+    const float metric = MotorControl_FastAbs(s_motorCtrl.hfi.accum_metric) /
+                         (float)s_motorCtrl.hfi.sample_count;
+
+    s_motorCtrl.hfi.candidate_metrics[s_motorCtrl.hfi.active_index] = metric;
+
+    if ((s_motorCtrl.hfi.active_index + 1U) < s_motorCtrl.hfi.candidate_count) {
+      MotorControl_HfiLoadCandidate(
+          s_motorCtrl.hfi.active_index + 1U,
+          ((s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_POLARITY_POS) ||
+           (s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_POLARITY_NEG))
+              ? polarityVoltageV
+              : injectVoltageV,
+          s_motorCtrl.hfi.sample_target);
+    } else {
+      MotorControl_HfiAdvancePhase(injectVoltageV, polarityVoltageV);
+    }
+  }
+
+  if (s_motorCtrl.status.state != MOTOR_STATE_HFI_IPD) {
+    return;
+  }
+
+  if (!s_motorCtrl.outputsUnmasked) {
+    s_motorCtrl.outputsUnmasked = true;
+  }
+
+  if ((s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_POLARITY_POS) ||
+      (s_motorCtrl.hfi.phase == MOTOR_HFI_PHASE_POLARITY_NEG)) {
+    s_motorCtrl.hfi.command_sign = 1;
+    s_motorCtrl.hfi.command_valid = true;
+    MotorControl_ApplyVoltageVector(s_motorCtrl.hfi.command_angle_rad,
+                                    s_motorCtrl.hfi.command_voltage_v,
+                                    s_motorCtrl.status.bus_voltage_v);
+  } else {
+    s_motorCtrl.hfi.command_sign = -s_motorCtrl.hfi.command_sign;
+    if (!s_motorCtrl.hfi.command_valid) {
+      s_motorCtrl.hfi.command_sign = 1;
+    }
+    s_motorCtrl.hfi.command_valid = true;
+    MotorControl_ApplyVoltageVector(
+        s_motorCtrl.hfi.command_angle_rad,
+        (float)s_motorCtrl.hfi.command_sign * s_motorCtrl.hfi.command_voltage_v,
+        s_motorCtrl.status.bus_voltage_v);
+  }
+
+  MotorHwYtm32_SetOutputsMasked(false);
+}
+
+/**
+ * @brief Attempt HFI/IPD before the classic ALIGN -> OPEN_LOOP startup chain.
+ */
+static void MotorControl_StartHfiIpd(void) {
+  uint8_t candidateCount;
+  uint8_t i;
+
+  MotorFoc_Reset(&s_motorCtrl.foc);
+  s_motorCtrl.latestPhaseErrorRad = 0.0f;
+  s_motorCtrl.latestObserverAngleRad = 0.0f;
+  s_motorCtrl.observerPhaseOffsetRad = 0.0f;
+  s_motorCtrl.observerLockResidualRad = 0.0f;
+  s_motorCtrl.openLoopAngleRad = MotorControl_GetAlignAngle();
+  s_motorCtrl.openLoopSpeedRadS = 0.0f;
+  s_motorCtrl.closedLoopBlend = 0.0f;
+  s_motorCtrl.observerLockCount = 0U;
+  s_motorCtrl.observerLossCount = 0U;
+  s_motorCtrl.stallAngleDivCount = 0U;
+  s_motorCtrl.startupTimeMs = 0U;
+  s_motorCtrl.openLoopFilteredCurrentA = 0.0f;
+  MotorControl_ResetHfiStatus();
+
+  candidateCount = MotorControl_GetConfiguredHfiCandidateCount();
+  s_motorCtrl.hfi.phase = MOTOR_HFI_PHASE_COARSE_SCAN;
+  s_motorCtrl.hfi.candidate_count = candidateCount;
+  s_motorCtrl.hfi.coarse_step_rad = MOTOR_CFG_PI_F / (float)candidateCount;
+  s_motorCtrl.hfi.polarity_positive_metric = 0.0f;
+  s_motorCtrl.hfi.polarity_negative_metric = 0.0f;
+
+  for (i = 0U; i < candidateCount; i++) {
+    s_motorCtrl.hfi.candidate_angles[i] =
+        (float)i * s_motorCtrl.hfi.coarse_step_rad;
+    s_motorCtrl.hfi.candidate_metrics[i] = 0.0f;
+  }
+
+  MotorControl_HfiLoadCandidate(
+      0U, MotorControl_GetConfiguredHfiInjectVoltageV(s_motorCtrl.status.bus_voltage_v),
+      (uint16_t)(MotorControl_GetConfiguredHfiPulsePairs() * 2U));
+
+  s_motorCtrl.status.id_target_a = 0.0f;
+  s_motorCtrl.status.iq_target_a = 0.0f;
+  s_motorCtrl.status.id_a = 0.0f;
+  s_motorCtrl.status.iq_a = 0.0f;
+  s_motorCtrl.status.observer_locked = false;
+  s_motorCtrl.fastLoopRunning = true;
+  s_motorCtrl.outputsUnmasked = false;
+  MotorHwYtm32_SetOutputsMasked(true);
+  MotorHwYtm32_ApplyPhaseDuty(0.5f, 0.5f, 0.5f);
+  MotorControl_SetState(MOTOR_STATE_HFI_IPD);
+}
+
+/**
+ * @brief Choose between HFI/IPD and the legacy ALIGN state.
+ */
+static void MotorControl_StartStaticStartupSequence(void) {
+  MotorControl_ResetHfiStatus();
+
+  if (!MotorControl_IsHfiEnabled()) {
+    s_motorCtrl.status.hfi_fallback_reason = MOTOR_HFI_FALLBACK_DISABLED;
+    MotorControl_StartAlign();
+    return;
+  }
+
+  if ((s_motorCtrl.status.bus_voltage_v < MOTOR_CFG_VBUS_UNDERVOLTAGE_V) ||
+      (s_motorCtrl.status.bus_voltage_v > MOTOR_CFG_VBUS_OVERVOLTAGE_V)) {
+    s_motorCtrl.status.hfi_fallback_reason = MOTOR_HFI_FALLBACK_INVALID_VBUS;
+    MotorControl_StartAlign();
+    return;
+  }
+
+  MotorControl_StartHfiIpd();
 }
 
 /**
@@ -410,12 +1280,11 @@ static void MotorControl_StartOpenLoop(void) {
   s_motorCtrl.openLoopSpeedRadS = 0.0f;
   s_motorCtrl.startupTimeMs = 0U;
   s_motorCtrl.stallAngleDivCount = 0U;
+  s_motorCtrl.openLoopFilteredCurrentA = 0.0f;
   s_motorCtrl.observerPhaseOffsetRad = s_motorCtrl.latestPhaseErrorRad;
   s_motorCtrl.observerLockResidualRad = 0.0f;
   s_motorCtrl.status.id_target_a = 0.0f;
-  s_motorCtrl.status.iq_target_a =
-      MotorControl_GetSignedDirection() *
-      (MOTOR_CFG_ALIGN_CURRENT_A + s_motorCtrl.startupIqBoostA);
+  s_motorCtrl.status.iq_target_a = 0.0f;
   MotorControl_SetState(MOTOR_STATE_OPEN_LOOP_RAMP);
 }
 
@@ -436,11 +1305,105 @@ static void MotorControl_StartClosedLoop(void) {
    * the steady-state torque demand of a blower fan.  A large pre-load causes
    * severe speed overshoot and oscillation on the first closed-loop cycles.
    * Limit to half the open-loop current so the PI can ramp smoothly. */
-  s_motorCtrl.foc.speed_pi_integrator_a = MotorControl_Clamp(
-      s_motorCtrl.status.iq_target_a, -MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f,
-      MOTOR_CFG_OPEN_LOOP_IQ_A * 0.5f);
+  {
+    const float openLoopIqClampA = MotorControl_GetStartupIqLimitA();
+    s_motorCtrl.foc.speed_pi_integrator_a = MotorControl_Clamp(
+        s_motorCtrl.status.iq_target_a, -openLoopIqClampA * 0.5f,
+        openLoopIqClampA * 0.5f);
+  }
   s_motorCtrl.fwIdTargetA = 0.0f;
   MotorControl_SetState(MOTOR_STATE_CLOSED_LOOP);
+}
+
+/**
+ * @brief Update passive BEMF angle monitor from one raw sample set.
+ * @param bemfURaw   Phase-U BEMF ADC count.
+ * @param bemfVRaw   Phase-V BEMF ADC count.
+ * @param bemfWRaw   Phase-W BEMF ADC count.
+ * @param bemfComRaw Virtual-neutral BEMF ADC count.
+ */
+static void MotorControl_UpdateAngleMonitorSample(uint16_t bemfURaw,
+                                                  uint16_t bemfVRaw,
+                                                  uint16_t bemfWRaw,
+                                                  uint16_t bemfComRaw) {
+  const float bemfU = (float)((int32_t)bemfURaw - (int32_t)bemfComRaw);
+  const float bemfV = (float)((int32_t)bemfVRaw - (int32_t)bemfComRaw);
+  const float bemfW = (float)((int32_t)bemfWRaw - (int32_t)bemfComRaw);
+  const float bemfAlpha = bemfU;
+  const float bemfBeta = (bemfU + (2.0f * bemfV)) * MOTOR_CFG_INV_SQRT3_F;
+  const float bemfMagnitude =
+      MotorControl_FastSqrt((bemfAlpha * bemfAlpha) + (bemfBeta * bemfBeta));
+  const float speedFilterBlend = MotorControl_Clamp(
+      MOTOR_CFG_TWO_PI_F * MOTOR_CFG_ANGLE_MONITOR_SPEED_FILTER_BW_HZ *
+          MOTOR_CFG_FAST_LOOP_DT_S,
+      0.0f, 1.0f);
+  int8_t direction = 0;
+
+  s_motorCtrl.bemfLastU = bemfURaw;
+  s_motorCtrl.bemfLastV = bemfVRaw;
+  s_motorCtrl.bemfLastW = bemfWRaw;
+  s_motorCtrl.bemfLastCom = bemfComRaw;
+  s_motorCtrl.status.angle_monitor_active = true;
+  s_motorCtrl.status.angle_monitor_bemf_mag = (uint16_t)bemfMagnitude;
+
+  if (bemfMagnitude < MOTOR_CFG_ANGLE_MONITOR_MIN_BEMF_COUNTS) {
+    s_motorCtrl.angleMonitorSeeded = false;
+    s_motorCtrl.status.angle_monitor_valid = false;
+    s_motorCtrl.status.angle_monitor_speed_rad_s = 0.0f;
+    s_motorCtrl.status.electrical_speed_rad_s = 0.0f;
+    s_motorCtrl.status.mechanical_rpm = 0.0f;
+    s_motorCtrl.status.observer_locked = false;
+    return;
+  }
+
+  {
+    const float bemfAngleRad = MotorFoc_WrapAngle0ToTwoPi(
+        MotorControl_FastAtan2(bemfBeta, bemfAlpha));
+
+    if (!s_motorCtrl.angleMonitorSeeded) {
+      s_motorCtrl.angleMonitorSeeded = true;
+      s_motorCtrl.angleMonitorBemfAngleRad = bemfAngleRad;
+      s_motorCtrl.status.angle_monitor_speed_rad_s = 0.0f;
+      return;
+    }
+
+    const float bemfDeltaRad = MotorFoc_AngleDiff(
+        bemfAngleRad, s_motorCtrl.angleMonitorBemfAngleRad);
+    const float instantaneousSpeedRadS =
+        bemfDeltaRad / MOTOR_CFG_FAST_LOOP_DT_S;
+
+    s_motorCtrl.angleMonitorBemfAngleRad = bemfAngleRad;
+    s_motorCtrl.status.angle_monitor_speed_rad_s +=
+        speedFilterBlend *
+        (instantaneousSpeedRadS - s_motorCtrl.status.angle_monitor_speed_rad_s);
+  }
+
+  if (s_motorCtrl.status.angle_monitor_speed_rad_s >
+      MOTOR_CFG_ANGLE_MONITOR_VALID_SPEED_RAD_S) {
+    direction = 1;
+  } else if (s_motorCtrl.status.angle_monitor_speed_rad_s <
+             -MOTOR_CFG_ANGLE_MONITOR_VALID_SPEED_RAD_S) {
+    direction = -1;
+  }
+
+  if (direction != 0) {
+    s_motorCtrl.status.angle_monitor_valid = true;
+    s_motorCtrl.status.angle_monitor_angle_rad = MotorFoc_WrapAngle0ToTwoPi(
+        s_motorCtrl.angleMonitorBemfAngleRad -
+        ((float)direction * MOTOR_CFG_HALF_PI_F));
+    s_motorCtrl.status.electrical_angle_rad =
+        s_motorCtrl.status.angle_monitor_angle_rad;
+    s_motorCtrl.status.electrical_speed_rad_s =
+        s_motorCtrl.status.angle_monitor_speed_rad_s;
+    s_motorCtrl.status.mechanical_rpm = MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(
+        s_motorCtrl.status.angle_monitor_speed_rad_s);
+    s_motorCtrl.status.observer_locked = true;
+  } else {
+    s_motorCtrl.status.angle_monitor_valid = false;
+    s_motorCtrl.status.observer_locked = false;
+  }
+
+  (void)bemfW;
 }
 
 /* ========================= Startup Failure Retry ========================== */
@@ -554,7 +1517,7 @@ static void MotorControl_UpdateWindDetectState(void) {
   /* Timeout protection — assume standstill if no valid reading in time */
   if (s_motorCtrl.stateTimeMs >= MOTOR_CFG_WIND_DETECT_TIMEOUT_MS) {
     MotorHwYtm32_SwitchAdcToCurrentSensing();
-    MotorControl_StartAlign();
+    MotorControl_StartStaticStartupSequence();
     return;
   }
 
@@ -590,7 +1553,7 @@ static void MotorControl_UpdateWindDetectState(void) {
   /* Below standstill threshold — normal startup */
   if (mechRpm < MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM) {
     MotorHwYtm32_SwitchAdcToCurrentSensing();
-    MotorControl_StartAlign();
+    MotorControl_StartStaticStartupSequence();
     return;
   }
 
@@ -664,7 +1627,7 @@ static void MotorControl_UpdateCoastDownState(void) {
 
   /* When speed drops below safe threshold, enter normal Align startup */
   if (absSpeedRadS < MOTOR_CFG_COAST_DOWN_SAFE_SPEED_RAD_S) {
-    MotorControl_StartAlign();
+    MotorControl_StartStaticStartupSequence();
     return;
   }
 
@@ -689,24 +1652,72 @@ static void MotorControl_UpdateOpenLoopState(void) {
       (__builtin_fabsf(MOTOR_CFG_OPEN_LOOP_FINAL_RAD_S) *
        MOTOR_CFG_SPEED_LOOP_DT_S) /
       openLoopRampTimeS;
-  /* Open-loop final Iq target = base + retry boost */
-  const float openLoopIqFinalA =
-      MOTOR_CFG_OPEN_LOOP_IQ_A + s_motorCtrl.startupIqBoostA;
+  const float openLoopIqFinalA = MotorControl_GetStartupIqLimitA();
+  const float minStartupIqA =
+      MotorControl_Clamp(MOTOR_CFG_IF_MIN_IQ_A, 0.0f, openLoopIqFinalA);
+  const float iqRampTimeS =
+      (MOTOR_CFG_IF_CURRENT_RAMP_TIME_MS > 0U)
+          ? ((float)MOTOR_CFG_IF_CURRENT_RAMP_TIME_MS * 0.001f)
+          : MOTOR_CFG_SPEED_LOOP_DT_S;
   const float iqStepA =
-      (__builtin_fabsf(openLoopIqFinalA - (MOTOR_CFG_ALIGN_CURRENT_A +
-                                           s_motorCtrl.startupIqBoostA)) *
-       MOTOR_CFG_SPEED_LOOP_DT_S) /
-      openLoopRampTimeS;
+      (openLoopIqFinalA * MOTOR_CFG_SPEED_LOOP_DT_S) / iqRampTimeS;
   const float phaseTrackBlend = MotorControl_Clamp(
       MOTOR_CFG_OBSERVER_PHASE_TRACK_BW_RAD_S * MOTOR_CFG_SPEED_LOOP_DT_S, 0.0f,
       1.0f);
+  const float currentFilterBlend = MotorControl_Clamp(
+      MOTOR_CFG_TWO_PI_F * MOTOR_CFG_IF_CURRENT_FILTER_BW_HZ *
+          MOTOR_CFG_SPEED_LOOP_DT_S,
+      0.0f, 1.0f);
   float openLoopSpeedMagRadS;
+  float currentAccelScale = 1.0f;
+  float residualAccelScale = 1.0f;
+  float accelScale;
+  float targetIqMagA = openLoopIqFinalA;
+  float iqTargetMagA;
 
   s_motorCtrl.stateTimeMs++;
   s_motorCtrl.startupTimeMs++;
 
+  s_motorCtrl.openLoopFilteredCurrentA += currentFilterBlend *
+                                          (MotorControl_GetStartupCurrentMagnitudeA() -
+                                           s_motorCtrl.openLoopFilteredCurrentA);
+
+  if (MOTOR_CFG_IF_CURRENT_MARGIN_A > 0.0f) {
+    currentAccelScale = MotorControl_Clamp(
+        (openLoopIqFinalA + MOTOR_CFG_IF_CURRENT_MARGIN_A -
+         s_motorCtrl.openLoopFilteredCurrentA) /
+            (2.0f * MOTOR_CFG_IF_CURRENT_MARGIN_A),
+        MOTOR_CFG_IF_ACCEL_MIN_SCALE, 1.0f);
+
+    if (s_motorCtrl.openLoopFilteredCurrentA >=
+        (openLoopIqFinalA + MOTOR_CFG_IF_CURRENT_MARGIN_A)) {
+      currentAccelScale = 0.0f;
+    }
+  }
+
+  if ((__builtin_fabsf(s_motorCtrl.openLoopSpeedRadS) >=
+       MOTOR_CFG_MIN_LOCK_ELEC_SPEED_RAD_S) &&
+      (MOTOR_CFG_STALL_ANGLE_ERR_RAD >
+       MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD)) {
+    residualAccelScale = MotorControl_Clamp(
+        (MOTOR_CFG_STALL_ANGLE_ERR_RAD -
+         __builtin_fabsf(s_motorCtrl.observerLockResidualRad)) /
+            (MOTOR_CFG_STALL_ANGLE_ERR_RAD -
+             MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD),
+        MOTOR_CFG_IF_ACCEL_MIN_SCALE, 1.0f);
+
+    if (__builtin_fabsf(s_motorCtrl.observerLockResidualRad) >=
+        MOTOR_CFG_STALL_ANGLE_ERR_RAD) {
+      residualAccelScale = 0.0f;
+    }
+  }
+
+  accelScale = (currentAccelScale < residualAccelScale) ? currentAccelScale
+                                                        : residualAccelScale;
   openLoopSpeedMagRadS = MotorControl_Clamp(
-      (__builtin_fabsf(s_motorCtrl.openLoopSpeedRadS) + speedStepRadS), 0.0f,
+      (__builtin_fabsf(s_motorCtrl.openLoopSpeedRadS) +
+       (speedStepRadS * accelScale)),
+      0.0f,
       MOTOR_CFG_OPEN_LOOP_FINAL_RAD_S);
   s_motorCtrl.openLoopSpeedRadS =
       MotorControl_GetSignedDirection() * openLoopSpeedMagRadS;
@@ -717,9 +1728,17 @@ static void MotorControl_UpdateOpenLoopState(void) {
       MotorControl_WrapAngleSigned(MotorFoc_AngleDiff(
           s_motorCtrl.latestPhaseErrorRad, s_motorCtrl.observerPhaseOffsetRad));
   s_motorCtrl.status.id_target_a = 0.0f;
-  s_motorCtrl.status.iq_target_a = MotorControl_SlewTowards(
-      s_motorCtrl.status.iq_target_a,
-      MotorControl_GetSignedDirection() * openLoopIqFinalA, iqStepA);
+  if (s_motorCtrl.openLoopFilteredCurrentA > openLoopIqFinalA) {
+    targetIqMagA = MotorControl_Clamp(
+        openLoopIqFinalA -
+            (s_motorCtrl.openLoopFilteredCurrentA - openLoopIqFinalA),
+        minStartupIqA, openLoopIqFinalA);
+  }
+  iqTargetMagA =
+      MotorControl_SlewTowards(__builtin_fabsf(s_motorCtrl.status.iq_target_a),
+                               targetIqMagA, iqStepA);
+  s_motorCtrl.status.iq_target_a =
+      MotorControl_GetSignedDirection() * iqTargetMagA;
 
   /* ---------- Angle Divergence Stall Detection ----------
    * When the open-loop forced speed has ramped above the minimum lock speed,
@@ -843,11 +1862,23 @@ static void MotorControl_HandleSlowLoop(void) {
   s_motorCtrl.status.mechanical_rpm = MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(
       s_motorCtrl.status.electrical_speed_rad_s);
 
+  if (s_motorCtrl.angleMonitorRequest) {
+    s_motorCtrl.status.enabled = false;
+    if (s_motorCtrl.status.state != MOTOR_STATE_ANGLE_MONITOR) {
+      MotorControl_StartAngleMonitor();
+    }
+    return;
+  }
+
   if (!s_motorCtrl.enableRequest) {
     if (s_motorCtrl.status.state != MOTOR_STATE_STOP) {
       MotorControl_EnterStop();
     }
     return;
+  }
+
+  if (s_motorCtrl.status.state == MOTOR_STATE_ANGLE_MONITOR) {
+    MotorControl_EnterStop();
   }
 
   switch (s_motorCtrl.status.state) {
@@ -868,17 +1899,31 @@ static void MotorControl_HandleSlowLoop(void) {
     break;
 #endif
 
+  case MOTOR_STATE_HFI_IPD:
+    s_motorCtrl.stateTimeMs++;
+    break;
+
   case MOTOR_STATE_ALIGN:
+  {
+    const float alignTargetA = MotorControl_GetAlignCurrentTargetA();
+    const float alignRampTimeS =
+        (MOTOR_CFG_ALIGN_CURRENT_RAMP_TIME_MS > 0U)
+            ? ((float)MOTOR_CFG_ALIGN_CURRENT_RAMP_TIME_MS * 0.001f)
+            : MOTOR_CFG_SPEED_LOOP_DT_S;
+    const float alignStepA =
+        (alignTargetA * MOTOR_CFG_SPEED_LOOP_DT_S) / alignRampTimeS;
+
     s_motorCtrl.stateTimeMs++;
     s_motorCtrl.startupTimeMs++;
-    s_motorCtrl.status.id_target_a =
-        MOTOR_CFG_ALIGN_CURRENT_A + (s_motorCtrl.startupIqBoostA * 0.5f);
+    s_motorCtrl.status.id_target_a = MotorControl_SlewTowards(
+        s_motorCtrl.status.id_target_a, alignTargetA, alignStepA);
     s_motorCtrl.status.iq_target_a = 0.0f;
 
-    if (s_motorCtrl.stateTimeMs >= MOTOR_CFG_ALIGN_TIME_MS) {
+    if (s_motorCtrl.stateTimeMs >= MotorControl_GetAlignHoldTimeMs()) {
       MotorControl_StartOpenLoop();
     }
     break;
+  }
 
   case MOTOR_STATE_OPEN_LOOP_RAMP:
     MotorControl_UpdateOpenLoopState();
@@ -924,6 +1969,7 @@ void MotorControl_Init(void) {
       MotorControl_ClampIqTarget(MOTOR_CFG_DEFAULT_TARGET_IQ_A);
   s_motorCtrl.status.electrical_angle_rad = MotorControl_GetAlignAngle();
   s_motorCtrl.enableRequest = (MOTOR_APP_AUTO_START != 0U);
+  s_motorCtrl.angleMonitorRequest = false;
   s_motorCtrl.status.enabled = s_motorCtrl.enableRequest;
 
   MotorFoc_Init(&s_motorCtrl.foc);
@@ -939,10 +1985,27 @@ void MotorControl_Init(void) {
 
 void MotorControl_Enable(bool enable) {
   SDK_ENTER_CRITICAL();
+  if (enable) {
+    s_motorCtrl.angleMonitorRequest = false;
+  }
   s_motorCtrl.enableRequest = enable;
   s_motorCtrl.status.enabled = enable;
 
   if (!enable) {
+    MotorControl_EnterStop();
+  }
+
+  SDK_EXIT_CRITICAL();
+}
+
+void MotorControl_EnableAngleMonitor(bool enable) {
+  SDK_ENTER_CRITICAL();
+
+  s_motorCtrl.angleMonitorRequest = enable;
+  if (enable) {
+    s_motorCtrl.enableRequest = false;
+    s_motorCtrl.status.enabled = false;
+  } else if (s_motorCtrl.status.state == MOTOR_STATE_ANGLE_MONITOR) {
     MotorControl_EnterStop();
   }
 
@@ -1108,103 +2171,22 @@ void ADC0_IRQHandler(void) {
 #endif
   /* Drain all FIFO entries: scatter each result into the buffer by its
    * channel index (upper 16 bits), keeping the 12-bit value (lower 16). */
-  for (uint8_t i = 0; i < MOTOR_HW_ADC_SEQ_LEN; i++) {
+  for (uint8_t i = 0; i < MotorHwYtm32_GetActiveAdcSequenceLength(); i++) {
     const uint32_t fifoWord = ADC0->FIFO;
     adcSampleBuffer[fifoWord >> 16] = (uint16_t)fifoWord;
   }
   ADC0->STS = ADC_STS_EOSEQ_MASK | ADC_STS_OVR_MASK;
-
-  /* Convert raw ADC values → physical units and store into status */
-  s_motorCtrl.status.phase_current_a =
-      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_A_CH] -
-       s_motorCtrl.currentOffsetARaw) *
-      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
-  s_motorCtrl.status.phase_current_b =
-      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_B_CH] -
-       s_motorCtrl.currentOffsetBRaw) *
-      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
-  s_motorCtrl.status.phase_current_c =
-      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_C_CH] -
-       s_motorCtrl.currentOffsetCRaw) *
-      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
-  s_motorCtrl.status.bus_voltage_v =
-      (float)adcSampleBuffer[MOTOR_HW_ADC_VBUS_CH] *
-      MOTOR_CFG_ADC_COUNT_TO_VBUS_V;
-
-  if (s_motorCtrl.status.state == MOTOR_STATE_OFFSET_CAL) {
-    s_motorCtrl.currentOffsetASum +=
-        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_A_CH];
-    s_motorCtrl.currentOffsetBSum +=
-        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_B_CH];
-    s_motorCtrl.currentOffsetCSum +=
-        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_C_CH];
-    s_motorCtrl.offsetSampleCount++;
-
-    if (s_motorCtrl.offsetSampleCount >= MOTOR_CFG_OFFSET_CAL_SAMPLES) {
-      const float sampleCount = (float)s_motorCtrl.offsetSampleCount;
-
-      s_motorCtrl.currentOffsetARaw =
-          s_motorCtrl.currentOffsetASum / sampleCount;
-      s_motorCtrl.currentOffsetBRaw =
-          s_motorCtrl.currentOffsetBSum / sampleCount;
-      s_motorCtrl.currentOffsetCRaw =
-          s_motorCtrl.currentOffsetCSum / sampleCount;
-      if (s_motorCtrl.paramIdentRequested) {
-        /* Start param ident with user-provided config */
-        s_motorCtrl.paramIdentRequested = false;
-        motor_ident_config_t identCfg = s_pendingIdentCfg;
-        /* Fill in system / timing fields the GUI can't know */
-        identCfg.voltage_step_v = 2.0f;
-        identCfg.pwm_dt_s = MOTOR_CFG_FAST_LOOP_DT_S;
-        identCfg.slow_dt_s = MOTOR_CFG_SPEED_LOOP_DT_S;
-        identCfg.max_duty_modulation = MOTOR_CFG_SVM_MAX_MODULATION;
-        identCfg.overcurrent_a = MOTOR_CFG_PHASE_OVERCURRENT_A;
-        MotorParamIdent_Start(&identCfg);
-        MotorHwYtm32_SetOutputsMasked(false);
-        s_motorCtrl.outputsUnmasked = true;
-        MotorControl_SetState(MOTOR_STATE_PARAM_IDENT);
-      } else {
-#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
-        MotorControl_StartWindDetect();
-#else
-        MotorControl_StartAlign();
-#endif
-      }
-    }
-    goto irq_exit;
-  }
-
-  if ((s_motorCtrl.status.state == MOTOR_STATE_STOP) ||
-      (s_motorCtrl.status.state == MOTOR_STATE_FAULT)) {
-    goto irq_exit;
-  }
-
-  /* ---- Parameter identification fast loop (bypasses normal FOC) ---- */
-  if (s_motorCtrl.status.state == MOTOR_STATE_PARAM_IDENT) {
-    motor_ident_fast_input_t identIn;
-    motor_ident_fast_output_t identOut;
-    identIn.phase_current_a = s_motorCtrl.status.phase_current_a;
-    identIn.phase_current_b = s_motorCtrl.status.phase_current_b;
-    identIn.phase_current_c = s_motorCtrl.status.phase_current_c;
-    identIn.bus_voltage_v = s_motorCtrl.status.bus_voltage_v;
-    MotorParamIdent_RunFastLoop(&identIn, &identOut);
-    MotorHwYtm32_ApplyPhaseDuty(identOut.duty_u, identOut.duty_v,
-                                identOut.duty_w);
-    goto irq_exit;
-  }
 
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
   /* ---- BEMF voltage wind detection (all MOSFET off, no FOC) ----------- */
   if (s_motorCtrl.status.state == MOTOR_STATE_WIND_DETECT) {
     s_motorCtrl.bemfIsrTickCounter++;
 
-    /* Compute BEMF relative to hardware neutral point.
-     * All values are 12-bit unsigned ADC counts; subtraction gives a signed
-     * result centred around zero. */
+    /* Compute BEMF relative to the sampled virtual neutral node. */
     int16_t bemf_u_raw = adcSampleBuffer[MOTOR_HW_ADC_BEMF_U_CH];
     int16_t bemf_v_raw = adcSampleBuffer[MOTOR_HW_ADC_BEMF_V_CH];
     int16_t bemf_w_raw = adcSampleBuffer[MOTOR_HW_ADC_BEMF_W_CH];
-    int16_t bemf_com_raw = (bemf_u_raw + bemf_v_raw + bemf_w_raw) / 3;
+    int16_t bemf_com_raw = adcSampleBuffer[MOTOR_HW_ADC_BEMF_COM_CH];
     const int16_t bemfU = (int16_t)bemf_u_raw - (int16_t)bemf_com_raw;
     const int16_t bemfV = (int16_t)bemf_v_raw - (int16_t)bemf_com_raw;
     const int16_t bemfW = (int16_t)bemf_w_raw - (int16_t)bemf_com_raw;
@@ -1259,6 +2241,94 @@ void ADC0_IRQHandler(void) {
   }
 #endif
 
+  if (s_motorCtrl.status.state == MOTOR_STATE_ANGLE_MONITOR) {
+    MotorControl_UpdateAngleMonitorSample(
+        adcSampleBuffer[MOTOR_HW_ADC_BEMF_U_CH],
+        adcSampleBuffer[MOTOR_HW_ADC_BEMF_V_CH],
+        adcSampleBuffer[MOTOR_HW_ADC_BEMF_W_CH],
+        adcSampleBuffer[MOTOR_HW_ADC_BEMF_COM_CH]);
+    goto irq_exit;
+  }
+
+  /* Convert raw ADC values → physical units and store into status */
+  s_motorCtrl.status.phase_current_a =
+      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_A_CH] -
+       s_motorCtrl.currentOffsetARaw) *
+      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
+  s_motorCtrl.status.phase_current_b =
+      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_B_CH] -
+       s_motorCtrl.currentOffsetBRaw) *
+      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
+  s_motorCtrl.status.phase_current_c =
+      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_C_CH] -
+       s_motorCtrl.currentOffsetCRaw) *
+      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
+  s_motorCtrl.status.bus_voltage_v =
+      (float)adcSampleBuffer[MOTOR_HW_ADC_VBUS_CH] *
+      MOTOR_CFG_ADC_COUNT_TO_VBUS_V;
+
+  if (s_motorCtrl.status.state == MOTOR_STATE_OFFSET_CAL) {
+    s_motorCtrl.currentOffsetASum +=
+        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_A_CH];
+    s_motorCtrl.currentOffsetBSum +=
+        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_B_CH];
+    s_motorCtrl.currentOffsetCSum +=
+        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_C_CH];
+    s_motorCtrl.offsetSampleCount++;
+
+    if (s_motorCtrl.offsetSampleCount >= MOTOR_CFG_OFFSET_CAL_SAMPLES) {
+      const float sampleCount = (float)s_motorCtrl.offsetSampleCount;
+
+      s_motorCtrl.currentOffsetARaw =
+          s_motorCtrl.currentOffsetASum / sampleCount;
+      s_motorCtrl.currentOffsetBRaw =
+          s_motorCtrl.currentOffsetBSum / sampleCount;
+      s_motorCtrl.currentOffsetCRaw =
+          s_motorCtrl.currentOffsetCSum / sampleCount;
+      if (s_motorCtrl.paramIdentRequested) {
+        /* Start param ident with user-provided config */
+        s_motorCtrl.paramIdentRequested = false;
+        motor_ident_config_t identCfg = s_pendingIdentCfg;
+        /* Fill in system / timing fields the GUI can't know */
+        identCfg.voltage_step_v = 2.0f;
+        identCfg.pwm_dt_s = MOTOR_CFG_FAST_LOOP_DT_S;
+        identCfg.slow_dt_s = MOTOR_CFG_SPEED_LOOP_DT_S;
+        identCfg.max_duty_modulation = MOTOR_CFG_SVM_MAX_MODULATION;
+        identCfg.overcurrent_a = MOTOR_CFG_PHASE_OVERCURRENT_A;
+        MotorParamIdent_Start(&identCfg);
+        MotorHwYtm32_SetOutputsMasked(false);
+        s_motorCtrl.outputsUnmasked = true;
+        MotorControl_SetState(MOTOR_STATE_PARAM_IDENT);
+      } else {
+#if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
+        MotorControl_StartWindDetect();
+#else
+        MotorControl_StartStaticStartupSequence();
+#endif
+      }
+    }
+    goto irq_exit;
+  }
+
+  if ((s_motorCtrl.status.state == MOTOR_STATE_STOP) ||
+      (s_motorCtrl.status.state == MOTOR_STATE_FAULT)) {
+    goto irq_exit;
+  }
+
+  /* ---- Parameter identification fast loop (bypasses normal FOC) ---- */
+  if (s_motorCtrl.status.state == MOTOR_STATE_PARAM_IDENT) {
+    motor_ident_fast_input_t identIn;
+    motor_ident_fast_output_t identOut;
+    identIn.phase_current_a = s_motorCtrl.status.phase_current_a;
+    identIn.phase_current_b = s_motorCtrl.status.phase_current_b;
+    identIn.phase_current_c = s_motorCtrl.status.phase_current_c;
+    identIn.bus_voltage_v = s_motorCtrl.status.bus_voltage_v;
+    MotorParamIdent_RunFastLoop(&identIn, &identOut);
+    MotorHwYtm32_ApplyPhaseDuty(identOut.duty_u, identOut.duty_v,
+                                identOut.duty_w);
+    goto irq_exit;
+  }
+
   if (__builtin_fabsf(s_motorCtrl.status.phase_current_a) >
           MOTOR_CFG_PHASE_OVERCURRENT_A ||
       __builtin_fabsf(s_motorCtrl.status.phase_current_b) >
@@ -1276,6 +2346,16 @@ void ADC0_IRQHandler(void) {
 
   if (s_motorCtrl.status.bus_voltage_v > MOTOR_CFG_VBUS_OVERVOLTAGE_V) {
     MotorControl_LatchFault(MOTOR_FAULT_VBUS_OVERVOLTAGE);
+    goto irq_exit;
+  }
+
+  if (s_motorCtrl.status.state == MOTOR_STATE_HFI_IPD) {
+    motor_ab_frame_t hfiIab;
+
+    MotorControl_Clarke(s_motorCtrl.status.phase_current_a,
+                        s_motorCtrl.status.phase_current_b,
+                        s_motorCtrl.status.phase_current_c, &hfiIab);
+    MotorControl_RunHfiIpdFastLoop(&hfiIab);
     goto irq_exit;
   }
 
@@ -1315,6 +2395,14 @@ void ADC0_IRQHandler(void) {
   focInput.iq_target_a = s_motorCtrl.status.iq_target_a;
   focInput.deadtime_comp_enable =
       (s_motorCtrl.status.state != MOTOR_STATE_ALIGN);
+
+  /* D-axis step injection from waveform capture */
+  {
+    float stepInjectId = CanConfig_GetStepInjectId();
+    if (stepInjectId != 0.0f) {
+      focInput.id_target_a = stepInjectId;
+    }
+  }
 
   MotorFoc_RunFast(&s_motorCtrl.foc, &focInput, &focOutput);
 

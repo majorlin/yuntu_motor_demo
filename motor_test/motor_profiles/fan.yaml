@@ -1,0 +1,73 @@
+# 鼓风机电机 (Fan/Blower Motor)
+# ============================================
+# 切换电机: pytest motor_test/ --motor-profile fan
+
+motor_name: "鼓风机电机"
+motor_id: fan
+
+# ── 电气模型参数 ──
+electrical:
+  pole_pairs: 3
+  rs_ohm: 0.105595
+  ls_h: 0.000130
+  flux_linkage_vs: 0.00533
+  bemf_ab_pp_v: 1.96
+  bemf_elec_freq_hz: 17.0
+
+# ── 运行范围 ──
+limits:
+  max_rpm: 8500
+  min_rpm: 300
+  default_target_rpm: 1000
+  max_iq_a: 16.0
+  default_iq_a: 1.0
+
+# ── 启动参数 ──
+startup:
+  align_current_a: 5.0
+  open_loop_iq_a: 8.0
+  align_time_ms: 300
+  open_loop_ramp_ms: 1000
+  timeout_ms: 2000
+  max_retries: 0
+
+# ── 控制器增益 ──
+control:
+  current_loop_bw_hz: 1200.0
+  speed_kp: 0.010250
+  speed_ki: 0.0010
+  speed_ramp_rpm_s: 600.0
+  observer_gain: 1.8e6
+  pll_kp: 120.0
+  pll_ki: 6000.0
+
+# ── 测试用例参数 ──
+test:
+  # 启停测试用 RPM
+  start_rpm: 1000
+  # 速度阶跃测试对
+  speed_step_pairs:
+    - [500, 1500]
+    - [1000, 2500]
+    - [2500, 500]
+  # 判定阈值
+  overshoot_limit_pct: 20.0
+  rise_time_limit_s: 3.0
+  settle_error_limit_pct: 10.0
+  # ── 测试时序 (鼓风机叶轮惯量大) ──
+  start_timeout_s: 10.0
+  settle_timeout_s: 8.0
+  capture_pre_s: 1.0
+  capture_post_s: 6.0
+  capture_interval_s: 0.01
+  stop_timeout_s: 5.0
+  inter_pair_delay_s: 1.0
+  # 启停循环间歇
+  start_stop_settle_s: 3.0
+  # endurance
+  endurance_duration_min: 30
+  # auto-tuner 参数
+  tune_base_rpm: 1000
+  tune_step_rpm: 2000
+  tune_kp_range: [0.0005, 0.02]
+  tune_ki_range: [0.001, 0.05]

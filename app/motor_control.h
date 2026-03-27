@@ -26,7 +26,9 @@ typedef enum
     MOTOR_STATE_OPEN_LOOP_RAMP,  /**< Ramping speed/current for startup tracking. */
     MOTOR_STATE_CLOSED_LOOP,     /**< Normal sensorless FOC closed-loop operation.*/
     MOTOR_STATE_PARAM_IDENT,     /**< Offline motor parameter identification.     */
-    MOTOR_STATE_FAULT            /**< Drive faulted. Requires disable to reset.   */
+    MOTOR_STATE_FAULT,           /**< Drive faulted. Requires disable to reset.   */
+    MOTOR_STATE_ANGLE_MONITOR,   /**< Outputs off, monitor hand-rotated BEMF angle.*/
+    MOTOR_STATE_HFI_IPD = 10     /**< Static high-frequency initial position detect. */
 } motor_control_state_t;
 
 /**
@@ -56,6 +58,19 @@ typedef enum
 } motor_control_mode_t;
 
 /**
+ * @brief HFI/IPD fallback cause exposed for telemetry.
+ */
+typedef enum
+{
+    MOTOR_HFI_FALLBACK_NONE = 0,             /**< HFI succeeded or was not attempted yet. */
+    MOTOR_HFI_FALLBACK_DISABLED = 1,         /**< HFI feature disabled by configuration.  */
+    MOTOR_HFI_FALLBACK_INVALID_VBUS = 2,     /**< Bus voltage unsuitable for HFI burst.   */
+    MOTOR_HFI_FALLBACK_LOW_CONFIDENCE = 3,   /**< Candidate scan separation too small.    */
+    MOTOR_HFI_FALLBACK_LOW_REPEATABILITY = 4,/**< Fine scan could not repeat the best bin. */
+    MOTOR_HFI_FALLBACK_POLARITY_AMBIGUOUS = 5/**< 180-degree polarity pulse unresolved.   */
+} motor_hfi_fallback_reason_t;
+
+/**
  * @brief Run-time status observability structure.
  */
 typedef struct
@@ -79,6 +94,18 @@ typedef struct
     float iq_target_a;               /**< Target commanded Q-axis current (A).        */
     float target_rpm;                /**< Currently ramped/commanded target speed.    */
     uint8_t startup_retry_count;     /**< Number of startup retries attempted so far. */
+    bool hfi_active;                 /**< True while HFI/IPD burst is running.        */
+    bool hfi_angle_valid;            /**< True when HFI estimated an initial angle.   */
+    bool hfi_used;                   /**< True when startup used the HFI angle.       */
+    uint8_t hfi_fallback_reason;     /**< motor_hfi_fallback_reason_t raw value.      */
+    float hfi_angle_rad;             /**< HFI estimated initial electrical angle.     */
+    float hfi_confidence;            /**< HFI confidence / separation metric [0..1].  */
+    float hfi_ripple_metric;         /**< Best synchronous current ripple metric (A). */
+    bool angle_monitor_active;       /**< True while passive BEMF angle monitor runs. */
+    bool angle_monitor_valid;        /**< True when manual-rotation angle is trusted. */
+    float angle_monitor_angle_rad;   /**< Monitored electrical angle from BEMF.       */
+    float angle_monitor_speed_rad_s; /**< Monitored electrical speed from BEMF.       */
+    uint16_t angle_monitor_bemf_mag; /**< BEMF vector magnitude in raw ADC counts.    */
 } motor_status_t;
 
 /**
@@ -133,6 +160,17 @@ void MotorControl_Init(void);
  * @param enable True to run motor, False to stop and mask PWM.
  */
 void MotorControl_Enable(bool enable);
+
+/**
+ * @brief Enable or disable passive BEMF angle monitoring.
+ *
+ * When enabled, the MCU keeps all inverter outputs masked, samples the BEMF
+ * network, and continuously estimates electrical angle/speed while the user
+ * manually rotates the rotor.
+ *
+ * @param enable True to enter monitor mode, False to return to STOP.
+ */
+void MotorControl_EnableAngleMonitor(bool enable);
 
 /**
  * @brief Change motor control tracking reference mode.

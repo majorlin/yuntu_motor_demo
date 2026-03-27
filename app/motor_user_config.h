@@ -4,13 +4,34 @@
 #include <stdint.h>
 
 /**
- * @file motor_user_config_fan.h
- * @brief User configuration for the YTM32 sensorless FOC stack (Fan variant).
+ * @file motor_user_config.h
+ * @brief User configuration for the YTM32 sensorless FOC stack.
  *
- * The values in this file are safe compile-time templates and are not final
- * production numbers. Replace the board analog front-end values and motor
- * parameters with real hardware data before tuning on hardware.
+ * This file contains:
+ *   1. Board/hardware-level parameters (ADC, PWM, protection) — shared by all
+ *      motors.
+ *   2. Motor profile selection via MOTOR_PROFILE_SELECT — one #define to switch
+ *      between different motors.
+ *
+ * Motor-specific parameters (electrical model, control gains, startup, observer
+ * etc.) live in separate profile headers under motor_profiles/.
  */
+
+/* ======================== Motor Profile Selection =========================
+ *
+ * 切换电机只需修改下面一行：
+ *   MOTOR_PROFILE_FAN  — 鼓风机电机
+ *   MOTOR_PROFILE_SEAT — 座椅电机 (无负载)
+ *
+ * 也可在编译命令行中指定：
+ *   -DMOTOR_PROFILE_SELECT=MOTOR_PROFILE_SEAT
+ */
+#define MOTOR_PROFILE_FAN  1
+#define MOTOR_PROFILE_SEAT 2
+
+#ifndef MOTOR_PROFILE_SELECT
+#define MOTOR_PROFILE_SELECT MOTOR_PROFILE_SEAT
+#endif
 
 /* ------------------------------- Constants -------------------------------- */
 
@@ -25,12 +46,6 @@
 
 /* 首次实机调试建议关闭自动起转，确认采样和PWM正常后再打开。 */
 #define MOTOR_APP_AUTO_START (0U)
-
-/* Default mechanical speed target exposed to the application interface. */
-#define MOTOR_CFG_DEFAULT_TARGET_RPM (1000.0f)
-
-/* Upper clamp for runtime speed commands coming from keys or debugger. */
-#define MOTOR_CFG_MAX_TARGET_RPM (8500.0f)
 
 /** @brief Default direction used at startup. Valid values are +1 or -1. */
 #define MOTOR_CFG_DEFAULT_DIRECTION (1)
@@ -146,261 +161,36 @@
  */
 #define MOTOR_CFG_VBUS_OVERVOLTAGE_V (18.0f)
 
-/* Startup timeout before declaring a fault, in milliseconds.
- * 鼓风机叶轮惯量大，开环锁定需要更多时间，放宽到 2.0s 给观测器更多收敛机会。 */
-#define MOTOR_CFG_STARTUP_TIMEOUT_MS (2000U)
+/* ----------------------- Sensorless angle monitor ------------------------- */
 
-/* Allowed observer phase error during acquisition, in electrical radians.
- * 放宽到 1.20 rad 提高首次启动成功率，减少对 retry 的依赖。 */
-#define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD (1.20f)
-
-/* Observer phase error above this value counts as lost lock. */
-#define MOTOR_CFG_OBSERVER_LOSS_PHASE_ERR_RAD (1.20f)
-
-/* Consecutive 1 kHz speed-loop samples required to accept observer lock.
- * 鼓风机负载稳定，适当降低连续样本要求以加快锁定。 */
-#define MOTOR_CFG_OBSERVER_LOCK_COUNT (15U)
-
-/** @brief Consecutive 1 kHz speed-loop samples that trigger observer-loss
- * fault. */
-#define MOTOR_CFG_OBSERVER_LOSS_COUNT (200U)
-
-/* Minimum electrical speed magnitude required before observer lock is accepted.
+/**
+ * @brief Minimum BEMF vector magnitude, in ADC counts, required to trust
+ * manual-rotation angle monitoring.
  */
-#define MOTOR_CFG_MIN_LOCK_ELEC_SPEED_RAD_S (80.0f)
+#define MOTOR_CFG_ANGLE_MONITOR_MIN_BEMF_COUNTS (18.0f)
 
-/* --------------------------- Motor electrical model ----------------------- */
-
-/*
- * Mechanical pole-pair count. This only affects the interface layer and the
- * speed conversion between RPM and electrical radians/second.
+/**
+ * @brief Low-pass bandwidth for the hand-rotation speed estimate.
  */
-#define MOTOR_CFG_POLE_PAIRS (3U)
+#define MOTOR_CFG_ANGLE_MONITOR_SPEED_FILTER_BW_HZ (25.0f)
 
-/* Stator phase resistance in ohms. */
-#define MOTOR_CFG_RS_OHM (0.105595f)
-
-/* D-axis inductance in henries. */
-#define MOTOR_CFG_LS_H (0.000130f)
-
-/** @brief During initial debug, assume surface-mount (SPM) motor without
- * salience: Ld = Lq = Ls. */
-#define MOTOR_CFG_LD_H (MOTOR_CFG_LS_H)
-
-/** @brief Q-axis inductance in henries. */
-#define MOTOR_CFG_LQ_H (MOTOR_CFG_LS_H)
-
-/*
- * Permanent-magnet flux linkage in volt-seconds/rad. This is a template value
- * used by the observer and should be replaced by motor-specific data.
+/**
+ * @brief Minimum electrical speed magnitude required before the monitored
+ * angle is marked valid.
  */
-/*
- * 由外拖反电势估算磁链：
- * 默认按 AB 线电压峰峰值 1.96V、电频 17Hz 计算。
- * 对正弦波，phase_peak = Vab_pp / (2 * sqrt(3))。
- * lambda = phase_peak / omega_e。
- */
-#define MOTOR_CFG_BEMF_AB_LINE_PP_V (1.96f)
-#define MOTOR_CFG_BEMF_ELEC_FREQ_HZ (17.0f)
-#define MOTOR_CFG_BEMF_PHASE_PEAK_V                                            \
-  ((0.5f * MOTOR_CFG_BEMF_AB_LINE_PP_V) * MOTOR_CFG_INV_SQRT3_F)
-#define MOTOR_CFG_FLUX_LINKAGE_VS                                              \
-  (MOTOR_CFG_BEMF_PHASE_PEAK_V /                                               \
-   (MOTOR_CFG_TWO_PI_F * MOTOR_CFG_BEMF_ELEC_FREQ_HZ))
+#define MOTOR_CFG_ANGLE_MONITOR_VALID_SPEED_RAD_S (8.0f)
 
-/* Maximum commanded q-axis current during closed-loop operation. */
-#define MOTOR_CFG_MAX_IQ_A (16.0f)
+/* ======================== Include Motor Profile ============================ */
 
-/* Default q-axis current target used by the debugger-facing current mode. */
-#define MOTOR_CFG_DEFAULT_TARGET_IQ_A (1.0f)
+#if MOTOR_PROFILE_SELECT == MOTOR_PROFILE_FAN
+#include "motor_profiles/motor_profile_fan.h"
+#elif MOTOR_PROFILE_SELECT == MOTOR_PROFILE_SEAT
+#include "motor_profiles/motor_profile_seat.h"
+#else
+#error "Unknown MOTOR_PROFILE_SELECT value. Define as MOTOR_PROFILE_FAN or MOTOR_PROFILE_SEAT."
+#endif
 
-/* ------------------------------ Current loop ------------------------------ */
-
-/*
- * Current-loop bandwidth in Hz. The PI gains below are derived from the motor
- * R/L model using a standard continuous-time approximation.
- */
-#define MOTOR_CFG_CURRENT_LOOP_BW_HZ (1200.0f)
-
-/* ------------------------------- Speed loop ------------------------------- */
-
-/*
- * Speed PI gains are intentionally exposed directly because the mechanical
- * plant depends on inertia, friction and load, which are not known yet.
- *
- * 鼓风机电机特点：叶轮惯量大、低速负载力矩小。
- * 开环阶段注入电流远大于闭环稳态需求，进入闭环后积分器预装值
- * 过高导致转速严重超调、来回振荡。需降低 Ki 防止积分器饱和,
- * 同时降低 Kp 减小比例环节冲击。
- */
-#define MOTOR_CFG_SPEED_KP (0.010250f)
-#define MOTOR_CFG_SPEED_KI (0.0010f)
-
-/* Runtime speed-command ramp to avoid large torque steps when changing rpm.
- * 鼓风机叶轮惯量大，过快斜坡容易产生过流，放缓到 600 RPM/s。 */
-#define MOTOR_CFG_SPEED_RAMP_RPM_PER_S (600.0f)
-
-/* --------------------------- Startup / transition ------------------------- */
-
-/** @brief Fixed electrical angle used during rotor alignment. */
-#define MOTOR_CFG_ALIGN_ANGLE_RAD (0.0f)
-
-/* D-axis current applied during alignment. */
-#define MOTOR_CFG_ALIGN_CURRENT_A (5.0f)
-
-/* Alignment duration in milliseconds.
- * 缩短对齐时间，将更多 startup budget 留给开环 sweep。 */
-#define MOTOR_CFG_ALIGN_TIME_MS (300U)
-
-/* Open-loop q-axis current target. It ramps up from the alignment current
- * magnitude. 鼓风机负载力矩小，过大的开环电流导致闭环切换后积分器
- * 预装值过高引起转速超调，降低到 5A 即可保证可靠启动。 */
-#define MOTOR_CFG_OPEN_LOOP_IQ_A (8.0f)
-
-/** @brief Total time for the open-loop current/speed ramp. */
-#define MOTOR_CFG_OPEN_LOOP_RAMP_TIME_MS (1000U)
-
-/* Final open-loop electrical speed magnitude before handover to observer. */
-#define MOTOR_CFG_OPEN_LOOP_FINAL_RAD_S (120.0f)
-
-/* Closed-loop phase blend duration in milliseconds. */
-#define MOTOR_CFG_CLOSED_LOOP_BLEND_MS (300U)
-
-/* ======================== Startup Retry / Stall Detect =====================
- */
-
-/** @brief Maximum number of automatic startup retries before hard fault.
- * 实机测试阶段禁用自动重试，启动失败直接报 FAULT 便于定位问题。 */
-#define MOTOR_CFG_STARTUP_MAX_RETRIES (0U)
-
-/** @brief Q-axis current increment per retry attempt (A).
- * Each retry adds this much Iq on top of the base open-loop current.
- * 如果负载较重、首次启动电流不足以拖动转子，重试时逐级加大注入电流。 */
-#define MOTOR_CFG_STARTUP_IQ_BOOST_STEP_A (1.0f)
-
-/** @brief Upper limit for the total Iq boost across all retries (A).
- * Prevents overcurrent even if BOOST_STEP × retries would exceed this. */
-#define MOTOR_CFG_STARTUP_IQ_BOOST_MAX_A (3.0f)
-
-/** @brief Angle residual (rad) above which the rotor is considered stalled
- * during open-loop ramp. When |observerLockResidual| exceeds this threshold
- * for STALL_ANGLE_DIV_COUNT consecutive speed-loop ticks, a stall is declared.
- * 设定为略大于 π/2 (1.57 rad)，表示观测器角度与强制角度偏差过大。 */
-#define MOTOR_CFG_STALL_ANGLE_ERR_RAD (1.80f)
-
-/** @brief Consecutive 1 kHz speed-loop samples with angle divergence
- * required to declare open-loop stall. 80 --> 80ms reaction time. */
-#define MOTOR_CFG_STALL_ANGLE_DIV_COUNT (80U)
-
-/* ========================= Wind Detect / Catch Spin ========================
- */
-
-/** @brief Enable wind detect before alignment (0 = disabled, traditional Align
- * flow). */
-#define MOTOR_CFG_ENABLE_WIND_DETECT (1U)
-
-/** @brief Wind detect observer settling timeout (ms).
- * 快启停场景下缩短风检等待，停机后叶轮基本已减速。 */
-#define MOTOR_CFG_WIND_DETECT_TIMEOUT_MS (300U)
-
-/** @brief Mechanical RPM below which the rotor is treated as standstill during
- * wind detection. 实测表明 200 RPM 以上才能可靠捕获，设 150 RPM 留余量。 */
-#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM (150.0f)
-
-/** @brief Derived electrical speed standstill threshold (rad/s). */
-#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S                                 \
-  MOTOR_CFG_MECH_RPM_TO_ELEC_RAD_S(MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM)
-
-/** @brief Number of consecutive speed-loop samples with stable speed to declare
- * convergence. 增加到 120 要求观测器速度持续稳定 120ms 才决策，过滤短暂噪声。
- */
-#define MOTOR_CFG_WIND_DETECT_SETTLE_COUNT (120U)
-
-/** @brief Maximum speed change per speed-loop tick for convergence check
- * (rad/s). */
-#define MOTOR_CFG_WIND_DETECT_SPEED_TOL_RAD_S (20.0f)
-
-/** @brief Maximum mechanical RPM for direct tailwind catch. Above this, brake
- * first. 提高到 2000 RPM 使大部分顺风场景都能直接闭环。 */
-#define MOTOR_CFG_CATCH_MAX_SPEED_RPM (2000.0f)
-
-/** @brief Electrical speed threshold for coast-down to transition to Align
- * (rad/s). Set below the wind-detect standstill threshold so the motor is
- * nearly stopped before alignment current is applied. */
-#define MOTOR_CFG_COAST_DOWN_SAFE_SPEED_RAD_S (80.0f)
-
-/** @brief Braking q-axis current magnitude for coast-down regenerative
- * deceleration (A). 制动电流不宜过大，以防无刹车电阻时母线过压。 */
-#define MOTOR_CFG_COAST_BRAKE_IQ_A (2.0f)
-
-/** @brief Bus voltage threshold to start reducing braking Iq (V).
- * When Vbus exceeds this, braking Iq is linearly reduced to zero over the
- * hysteresis band to prevent overvoltage. Set below VBUS_OVERVOLTAGE_V. */
-#define MOTOR_CFG_COAST_BRAKE_VBUS_LIMIT_V (16.0f)
-
-/** @brief Bus voltage hysteresis band width (V).
- * Braking Iq is linearly reduced from full to zero across this band above
- * the limit, i.e. Iq=0 when Vbus >= LIMIT + HYST. */
-#define MOTOR_CFG_COAST_BRAKE_VBUS_HYST_V (1.0f)
-
-/** @brief Minimum observer flux magnitude (Vs) to trust speed estimate for
- * CatchSpin. 当磁链幅值低于此阈值时，认为观测器速度为噪声而非真实转动。 */
-#define MOTOR_CFG_WIND_DETECT_MIN_FLUX_VS (MOTOR_CFG_FLUX_LINKAGE_VS * 0.30f)
-
-/** @brief Voltage divider ratio on the BEMF sensing resistor network. */
-#define MOTOR_CFG_BEMF_VOLTAGE_DIVIDER (5.0f)
-
-/** @brief Minimum BEMF zero crossings needed for a valid speed estimate.
- * 一个电周期有 6 个过零（3 相 × 上升+下降），6 个过零 = 1 整周期。 */
-#define MOTOR_CFG_WIND_DETECT_MIN_CROSSINGS (6U)
-
-/* ============================== Field Weakening ============================
- */
-
-/** @brief Enable field weakening control (0 = disabled, id_target stays 0). */
-#define MOTOR_CFG_ENABLE_FIELD_WEAKENING (1U)
-
-/** @brief Voltage modulation ratio threshold to start injecting negative Id
- * (0~1). */
-#define MOTOR_CFG_FW_VOLTAGE_THRESHOLD (0.50f)
-
-/** @brief Field weakening integral gain. Larger = faster response but may
- * oscillate. */
-#define MOTOR_CFG_FW_KI (50.0f)
-
-/** @brief Maximum negative Id current for field weakening (A). Must be
- * negative. */
-#define MOTOR_CFG_FW_MAX_NEGATIVE_ID_A (-4.0f)
-
-/** @brief Recovery rate (A/s) for Id returning to zero when voltage margin
- * restores. */
-#define MOTOR_CFG_FW_RECOVERY_RATE (20.0f)
-
-/* ------------------------- Observer / PLL parameters ---------------------- */
-
-/* Ortega observer correction gain. Larger values converge faster but add noise.
- */
-#define MOTOR_CFG_OBSERVER_GAIN (1.8e6f)
-
-/** @brief Flux magnitude compensation bandwidth in rad/s. */
-#define MOTOR_CFG_LAMBDA_COMP_BW_RAD_S (80.0f)
-
-/* Lower clamp for estimated flux linkage. */
-#define MOTOR_CFG_LAMBDA_MIN_VS (0.0040f)
-
-/* Upper clamp for estimated flux linkage. */
-#define MOTOR_CFG_LAMBDA_MAX_VS (0.0072f)
-
-/* PLL proportional gain. 降低 Kp 减小速度估计的噪声振荡。 */
-#define MOTOR_CFG_PLL_KP (120.0f)
-
-/* PLL integral gain. 同步降低 Ki 保持阻尼比，改善收敛稳定性。 */
-#define MOTOR_CFG_PLL_KI (6000.0f)
-
-/* 开环切环阶段对固定相位偏置的跟踪带宽。 */
-#define MOTOR_CFG_OBSERVER_PHASE_TRACK_BW_RAD_S (20.0f)
-
-/* ------------------------------- Derived data ----------------------------- */
+/* ======================== Derived Data (shared) ============================ */
 
 #define MOTOR_CFG_FAST_LOOP_DT_S (1.0f / (float)MOTOR_CFG_PWM_FREQUENCY_HZ)
 
@@ -432,7 +222,7 @@
   (MOTOR_CFG_ADC_COUNT_TO_VOLT / MOTOR_CFG_CURRENT_SENSE_V_PER_A)
 
 #define MOTOR_CFG_VBUS_DIVIDER_GAIN                                            \
-  ((MOTOR_CFG_VBUS_DIVIDER_R_TOP_OHM + MOTOR_CFG_VBUS_DIVIDER_R_BOTTOM_OHM) /  \
+  ((MOTOR_CFG_VBUS_DIVIDER_R_TOP_OHM + MOTOR_CFG_VBUS_DIVIDER_R_BOTTOM_OHM) / \
    MOTOR_CFG_VBUS_DIVIDER_R_BOTTOM_OHM)
 
 #define MOTOR_CFG_ADC_COUNT_TO_VBUS_V                                          \
@@ -458,6 +248,9 @@
 
 #define MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(speed_value)                          \
   ((speed_value) * 60.0f / (MOTOR_CFG_TWO_PI_F * (float)MOTOR_CFG_POLE_PAIRS))
+
+#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S                                 \
+  MOTOR_CFG_MECH_RPM_TO_ELEC_RAD_S(MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM)
 
 #define MOTOR_CFG_USED_PWM_CHANNEL_MASK (0xF3U)
 

@@ -51,6 +51,7 @@ static etmr_pwm_sync_t s_motorEtmrSync;
 static etmr_trig_config_t s_motorEtmrTrig;
 static etmr_trig_ch_param_t s_motorEtmrTrigChannel[1];
 static bool s_adcConfiguredForHardwareTrigger = true;
+static uint8_t s_adcSequenceLength = MOTOR_HW_ADC_CURRENT_SEQ_LEN;
 static ADC_Type *const s_motorHwAdcBase = ADC0;
 
 /**
@@ -166,6 +167,7 @@ static void MotorHwYtm32_ConfigAdc(bool hardwareTrigger, bool sequenceInterrupt,
   ADC_DRV_ClearReadyFlagCmd(MOTOR_HW_ADC_INSTANCE);
   ADC_DRV_ClearSampEndFlagCmd(MOTOR_HW_ADC_INSTANCE);
   s_adcConfiguredForHardwareTrigger = hardwareTrigger;
+  s_adcSequenceLength = MOTOR_HW_ADC_CURRENT_SEQ_LEN;
 }
 
 /**
@@ -405,6 +407,10 @@ bool MotorHwYtm32_ReadTriggeredFrame(motor_adc_raw_frame_t *frame) {
   return MotorHwYtm32_TryReadAdcFrame(frame);
 }
 
+uint8_t MotorHwYtm32_GetActiveAdcSequenceLength(void) {
+  return s_adcSequenceLength;
+}
+
 void MotorHwYtm32_StartPwmTimeBase(void) {
   eTMR_DRV_ClearTofFlag(MOTOR_HW_ETMR_INSTANCE);
   eTMR_DRV_Enable(MOTOR_HW_ETMR_INSTANCE);
@@ -443,10 +449,12 @@ void MotorHwYtm32_SwitchAdcToBemfSensing(void) {
   s_motorHwAdcBase->CHSEL[0] = MOTOR_HW_ADC_BEMF_U_CH;
   s_motorHwAdcBase->CHSEL[1] = MOTOR_HW_ADC_BEMF_V_CH;
   s_motorHwAdcBase->CHSEL[2] = MOTOR_HW_ADC_BEMF_W_CH;
+  s_motorHwAdcBase->CHSEL[3] = MOTOR_HW_ADC_BEMF_COM_CH;
   uint32_t temp = s_motorHwAdcBase->CFG0;
   temp &= ~ADC_CFG0_SEQLEN_MASK;
-  temp |= ADC_CFG0_SEQLEN(2U);
+  temp |= ADC_CFG0_SEQLEN(3U);
   s_motorHwAdcBase->CFG0 = temp;
+  s_adcSequenceLength = MOTOR_HW_ADC_BEMF_SEQ_LEN;
 }
 
 void MotorHwYtm32_SwitchAdcToCurrentSensing(void) {
@@ -460,14 +468,14 @@ void MotorHwYtm32_SwitchAdcToCurrentSensing(void) {
   temp &= ~ADC_CFG0_SEQLEN_MASK;
   temp |= ADC_CFG0_SEQLEN(3U);
   s_motorHwAdcBase->CFG0 = temp;
+  s_adcSequenceLength = MOTOR_HW_ADC_CURRENT_SEQ_LEN;
 }
 
 bool MotorHwYtm32_ReadBemfFrame(motor_bemf_raw_frame_t *frame) {
   frame->bemf_u_raw = (uint16_t)s_motorHwAdcBase->FIFO;
   frame->bemf_v_raw = (uint16_t)s_motorHwAdcBase->FIFO;
   frame->bemf_w_raw = (uint16_t)s_motorHwAdcBase->FIFO;
-  frame->bemf_com_raw =
-      (frame->bemf_u_raw + frame->bemf_v_raw + frame->bemf_w_raw) / 3;
+  frame->bemf_com_raw = (uint16_t)s_motorHwAdcBase->FIFO;
 
   MotorHwYtm32_ClearAdcFlags(ADC_STS_EOC_MASK | ADC_STS_EOSEQ_MASK |
                              ADC_STS_OVR_MASK);
@@ -475,7 +483,8 @@ bool MotorHwYtm32_ReadBemfFrame(motor_bemf_raw_frame_t *frame) {
 }
 
 void MotorHwYtm32_DrainBemfFifo(void) {
-  /* Discard 3 BEMF samples from the in-flight conversion */
+  /* Discard 4 BEMF samples from the in-flight conversion */
+  (void)s_motorHwAdcBase->FIFO;
   (void)s_motorHwAdcBase->FIFO;
   (void)s_motorHwAdcBase->FIFO;
   (void)s_motorHwAdcBase->FIFO;

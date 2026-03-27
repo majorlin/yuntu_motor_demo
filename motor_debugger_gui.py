@@ -22,14 +22,23 @@ from __future__ import annotations
 import argparse
 import collections
 import glob
+import math
 import os
 import struct
 import sys
 import threading
 import time
 import tkinter as tk
+import types
 from tkinter import ttk, messagebox, scrolledtext
 from typing import Any, Dict, Optional
+
+if "asammdf" not in sys.modules:
+    # python-can optionally imports asammdf for MF4 logging support. In this
+    # workstation the installed asammdf/PySide stack aborts during import, but
+    # this GUI does not use MF4 features. A tiny stub makes python-can fall
+    # back cleanly instead of crashing the whole process.
+    sys.modules["asammdf"] = types.ModuleType("asammdf")
 
 import can
 import cantools
@@ -58,8 +67,8 @@ DEFAULT_DBC = os.path.join(SCRIPT_DIR, "docs", "motor_control.dbc")
 
 STATE_MAP = {
     0: "STOP", 1: "OFFSET_CAL", 2: "WIND_DETECT", 3: "COAST_DOWN",
-    4: "ALIGN", 5: "OPEN_LOOP", 6: "CLOSED_LOOP", 7: "PARAM_IDENT",
-    8: "FAULT",
+    4: "ALIGN", 5: "OPEN_LOOP_RAMP", 6: "CLOSED_LOOP", 7: "PARAM_IDENT",
+    8: "FAULT", 9: "ANGLE_MONITOR", 10: "HFI_IPD",
 }
 
 # Background-color hints per state for the banner
@@ -73,6 +82,8 @@ STATE_COLOR_MAP = {
     6: "#a6e3a1",    # CLOSED_LOOP — green (running OK)
     7: "#cba6f7",    # PARAM_IDENT — lavender
     8: "#f38ba8",    # FAULT       — red
+    9: "#94e2d5",    # ANGLE_MONITOR — cyan/green
+    10: "#74c7ec",   # HFI_IPD     — light blue
 }
 
 FAULT_MAP = {
@@ -112,6 +123,7 @@ CURVE_DEFS = [
     # Subplot 4: Observer
     (4, "ObserverAngle",    "Obs Angle",     "#b388ff"),
     (4, "ElecAngle",        "Elec Angle",    "#69f0ae"),
+    (4, "AngleMonAngle",    "Mon Angle",     "#f9e2af"),
     (4, "PhaseErrorRad",    "Phase Err",     "#ff6e40"),
 ]
 
@@ -129,6 +141,16 @@ STATUS_SIGNALS = [
     ("IdTarget",            "Id*",              "A",    ".2f"),
     ("ElecSpeedRadS",       "ωe",               "rad/s",".1f"),
     ("ElecAngle",           "θe",               "rad",  ".4f"),
+    ("AngleMonFlags",       "Mon Flags",        "",     "02X"),
+    ("AngleMonAngle",       "Mon θe",           "rad",  ".4f"),
+    ("AngleMonAngleDeg",    "Mon θe°",          "deg",  ".1f"),
+    ("AngleMonSpeedRadS",   "Mon ωe",           "rad/s",".1f"),
+    ("AngleMonBemfMag",     "Mon BEMF",         "cnt",  "d"),
+    ("HfiFlags",            "HFI Flags",        "",     "02X"),
+    ("HfiFallbackReason",   "HFI Fallback",     "",     "d"),
+    ("HfiAngle",            "HFI θe",           "rad",  ".4f"),
+    ("HfiConfidence",       "HFI Conf",         "",     ".3f"),
+    ("HfiRippleMetric",     "HFI Ripple",       "A",    ".3f"),
     ("ObserverAngle",       "θ_obs",            "rad",  ".4f"),
     ("PLLSpeedRadS",        "ω_PLL",            "rad/s",".1f"),
     ("VoltModRatio",        "Mod Ratio",        "",     ".4f"),
@@ -148,6 +170,10 @@ STATUS_SIGNALS = [
     ("FwIdTarget",          "FW Id*",           "A",    ".2f"),
     ("ChipTemperature",     "T_chip",           "°C",   ".1f"),
     ("PcbTemperature",      "T_pcb",            "°C",   ".1f"),
+    ("BemfURaw",            "Bemf U",           "cnt",  "d"),
+    ("BemfVRaw",            "Bemf V",           "cnt",  "d"),
+    ("BemfWRaw",            "Bemf W",           "cnt",  "d"),
+    ("BemfComRaw",          "Bemf COM",         "cnt",  "d"),
     ("StallDivCount",       "Stall Cnt",        "",     "d"),
     ("StateTimeMs",         "State Time",       "ms",   "d"),
     ("Timestamp",           "Timestamp",        "ms",   "d"),
@@ -286,6 +312,7 @@ class MotorDebuggerApp:
         main.add(left_frame, weight=0)
 
         self._build_command_panel(left_frame)
+        self._build_angle_monitor_panel(left_frame)
         self._build_calibration_panel(left_frame)
 
         # Center: Charts
@@ -403,6 +430,46 @@ class MotorDebuggerApp:
                    command=self._send_calib_apply).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         self._build_param_ident_panel(parent)
+
+    # ---- Passive Angle Monitor Panel ------------------------------------
+    def _build_angle_monitor_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text="  🧭 Passive Angle Monitor (0x202)  ", padding=8)
+        frame.pack(fill=tk.X, padx=4, pady=4)
+
+        ttk.Label(
+            frame,
+            text="Hand-rotate the rotor. MCU keeps outputs masked and streams sensorless angle status.",
+            wraplength=260,
+            style="Unit.TLabel",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(btn_frame, text="▶ Start Monitor", style="Connect.TButton",
+                   command=self._start_angle_monitor).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        ttk.Button(btn_frame, text="⏹ Stop Monitor", style="Disconnect.TButton",
+                   command=self._stop_angle_monitor).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        self.angle_mon_value_vars: Dict[str, tk.StringVar] = {}
+        monitor_fields = [
+            ("Monitor", "active"),
+            ("Valid", "valid"),
+            ("Direction", "direction"),
+            ("Angle (rad)", "angle_rad"),
+            ("Angle (deg)", "angle_deg"),
+            ("Speed", "speed"),
+            ("BEMF", "bemf"),
+        ]
+        grid = ttk.Frame(frame)
+        grid.pack(fill=tk.X)
+        for row, (label_text, key) in enumerate(monitor_fields):
+            ttk.Label(grid, text=f"{label_text}:", width=10, anchor=tk.W).grid(
+                row=row, column=0, sticky=tk.W, padx=2, pady=1)
+            var = tk.StringVar(value="---")
+            self.angle_mon_value_vars[key] = var
+            ttk.Label(grid, textvariable=var, style="Val.TLabel", width=18, anchor=tk.W).grid(
+                row=row, column=1, sticky=tk.W, padx=2, pady=1)
 
     # ---- Chart -----------------------------------------------------------
     def _build_chart(self, parent):
@@ -843,18 +910,11 @@ class MotorDebuggerApp:
             tc_msg = self.db.get_message_by_name("PC_TestCommand")
             if extra_signals is None:
                 extra_signals = {}
-            data_dict = {
-                "TcCommandType": cmd_type,
-                "TcNSamples": 0,
-                "TcDecimation": 0,
-                "TcTriggerSource": 0,
-                "TcIdentPolePairs": 0,
-                "TcIdentTargetRpm": 0.0,
-                "TcIdentTestCurrentA": 0.0,
-                "TcIdentIqMinA": 0.0,
-                "TcIdentIqMaxA": 0.0,
-                "TcIdentIqStepA": 0.0,
-            }
+            data_dict = {}
+            for sig in tc_msg.signals:
+                is_float = getattr(getattr(sig, "conversion", None), "is_float", False)
+                data_dict[sig.name] = 0.0 if is_float else 0
+            data_dict["TcCommandType"] = cmd_type
             data_dict.update(extra_signals)
             data = tc_msg.encode(data_dict)
             msg = can.Message(
@@ -895,6 +955,14 @@ class MotorDebuggerApp:
     def _abort_param_ident(self):
         """Send TestCommand 0x21 to abort parameter identification."""
         self._send_test_command(0x21)
+
+    def _start_angle_monitor(self):
+        """Send TestCommand 0x30 to enter passive angle-monitor mode."""
+        self._send_test_command(0x30)
+
+    def _stop_angle_monitor(self):
+        """Send TestCommand 0x31 to leave passive angle-monitor mode."""
+        self._send_test_command(0x31)
 
     # ---- Chart Update ----------------------------------------------------
     def _update_chart(self, frame_num=None, force=False):
@@ -978,7 +1046,11 @@ class MotorDebuggerApp:
 
         # ── Update signal value labels ──
         for sig_name, disp_label, unit, fmt in STATUS_SIGNALS:
-            val = signals.get(sig_name)
+            if sig_name == "AngleMonAngleDeg":
+                mon_angle_rad = signals.get("AngleMonAngle")
+                val = math.degrees(float(mon_angle_rad)) if mon_angle_rad is not None else None
+            else:
+                val = signals.get(sig_name)
             label_widget = self.status_labels.get(sig_name)
             if label_widget is None:
                 continue
@@ -1003,6 +1075,29 @@ class MotorDebuggerApp:
                 txt = str(val)
 
             label_widget.config(text=txt)
+
+        # ── Update passive angle monitor panel ──
+        mon_flags = int(signals.get("AngleMonFlags", 0))
+        mon_active = bool(mon_flags & 0x01)
+        mon_valid = bool(mon_flags & 0x02)
+        mon_dir = "---"
+        if mon_active and mon_valid:
+            mon_dir = "FWD" if (mon_flags & 0x04) else "REV"
+        self.angle_mon_value_vars["active"].set("ON" if mon_active else "OFF")
+        self.angle_mon_value_vars["valid"].set("YES" if mon_valid else "NO")
+        self.angle_mon_value_vars["direction"].set(mon_dir)
+
+        mon_angle = signals.get("AngleMonAngle")
+        mon_speed = signals.get("AngleMonSpeedRadS")
+        mon_bemf = signals.get("AngleMonBemfMag")
+        self.angle_mon_value_vars["angle_rad"].set(
+            f"{float(mon_angle):.4f} rad" if mon_angle is not None else "---")
+        self.angle_mon_value_vars["angle_deg"].set(
+            f"{math.degrees(float(mon_angle)):.1f} deg" if mon_angle is not None else "---")
+        self.angle_mon_value_vars["speed"].set(
+            f"{float(mon_speed):.1f} rad/s" if mon_speed is not None else "---")
+        self.angle_mon_value_vars["bemf"].set(
+            f"{int(mon_bemf)} cnt" if mon_bemf is not None else "---")
 
         # ── Update parameter identification panel ──
         ident_phase_val = signals.get("IdentPhase")

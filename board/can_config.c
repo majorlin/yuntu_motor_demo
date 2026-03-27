@@ -237,6 +237,50 @@ static void CanConfig_SendStatus1(void) {
 
   /* Bytes 35-38: Timestamp */
   pack_u32(s_txBuf, 35, MotorControl_GetTickMs());
+  /* Byte 39: AngleMonFlags
+   * Bit0=active, Bit1=valid, Bit2=direction positive */
+  {
+    uint8_t angleFlags = 0U;
+    if (st->angle_monitor_active) {
+      angleFlags |= 0x01U;
+    }
+    if (st->angle_monitor_valid) {
+      angleFlags |= 0x02U;
+    }
+    if (st->angle_monitor_speed_rad_s >= 0.0f) {
+      angleFlags |= 0x04U;
+    }
+    pack_u8(s_txBuf, 39, angleFlags);
+  }
+  /* Bytes 40-41: AngleMonAngle, scale=0.0001 */
+  pack_u16(s_txBuf, 40, (uint16_t)(st->angle_monitor_angle_rad / 0.0001f));
+  /* Bytes 42-43: AngleMonSpeedRadS, scale=0.1 */
+  pack_s16(s_txBuf, 42, (int16_t)(st->angle_monitor_speed_rad_s / 0.1f));
+  /* Bytes 44-45: AngleMonBemfMag, raw ADC counts */
+  pack_u16(s_txBuf, 44, st->angle_monitor_bemf_mag);
+  /* Byte 46: HfiFlags
+   * Bit0=active, Bit1=angle_valid, Bit2=used */
+  {
+    uint8_t hfiFlags = 0U;
+    if (st->hfi_active) {
+      hfiFlags |= 0x01U;
+    }
+    if (st->hfi_angle_valid) {
+      hfiFlags |= 0x02U;
+    }
+    if (st->hfi_used) {
+      hfiFlags |= 0x04U;
+    }
+    pack_u8(s_txBuf, 46, hfiFlags);
+  }
+  /* Byte 47: HfiFallbackReason */
+  pack_u8(s_txBuf, 47, st->hfi_fallback_reason);
+  /* Bytes 48-49: HfiAngle, scale=0.0001 */
+  pack_u16(s_txBuf, 48, (uint16_t)(st->hfi_angle_rad / 0.0001f));
+  /* Bytes 50-51: HfiConfidence, scale=0.001 */
+  pack_u16(s_txBuf, 50, (uint16_t)(st->hfi_confidence / 0.001f));
+  /* Bytes 52-53: HfiRippleMetric, scale=0.001 */
+  pack_u16(s_txBuf, 52, (uint16_t)(st->hfi_ripple_metric / 0.001f));
 
   /* Send CAN FD frame */
   static const flexcan_data_info_t txInfo = {
@@ -433,6 +477,25 @@ static void CanConfig_SendCalibReadback(void) {
   pack_u8(s_txBuf, 46, (uint8_t)s_waveformCapture.state);
   /* Bytes 47-48: WaveformSampleCount */
   pack_u16(s_txBuf, 47, s_waveformCapture.write_idx);
+  /* Byte 49: ActiveHfiFlags (bit0=enable) */
+  pack_u8(s_txBuf, 49, s_calibParams.hfi_enable ? 0x01U : 0x00U);
+  /* Byte 50: ActiveHfiCandidateCount */
+  pack_u8(s_txBuf, 50, s_calibParams.hfi_candidate_count);
+  /* Byte 51: ActiveHfiPulsePairs */
+  pack_u8(s_txBuf, 51, s_calibParams.hfi_pulse_pairs);
+  /* Bytes 52-53: ActiveHfiInjectV, scale=0.01 */
+  pack_u16(s_txBuf, 52,
+           (uint16_t)(s_calibParams.hfi_inject_voltage_v / 0.01f));
+  /* Bytes 54-55: ActiveHfiConfidenceMin, scale=0.001 */
+  pack_u16(s_txBuf, 54,
+           (uint16_t)(s_calibParams.hfi_confidence_threshold / 0.001f));
+  /* Bytes 56-57: ActiveHfiPolarityV, scale=0.01 */
+  pack_u16(s_txBuf, 56,
+           (uint16_t)(s_calibParams.hfi_polarity_voltage_v / 0.01f));
+  /* Byte 58: ActiveHfiPolarityPulseCount */
+  pack_u8(s_txBuf, 58, s_calibParams.hfi_polarity_pulse_count);
+  /* Bytes 59-60: ActiveHfiAlignHoldMs */
+  pack_u16(s_txBuf, 59, s_calibParams.hfi_align_hold_ms);
 
   static const flexcan_data_info_t txInfo = {
       .msg_id_type = FLEXCAN_MSG_ID_STD,
@@ -541,6 +604,8 @@ static void CanConfig_ProcessCalibWrite(void) {
  *           0x02 = Abort waveform capture
  *           0x03 = Start sending captured data (burst)
  *           0x10 = Reset current PI to defaults
+ *           0x30 = Start passive angle monitor
+ *           0x31 = Stop passive angle monitor
  *   [1-2] N samples (uint16, for capture start)
  *   [3]   Decimation factor (sample every N ticks, default 1)
  *   [4]   Trigger source (can_waveform_trigger_t)
@@ -573,6 +638,47 @@ static void CanConfig_ProcessTestCommand(void) {
     s_waveformCapture.decimation = decimation;
     s_waveformCapture.tick_count = 0U;
     s_waveformCapture.state = CAN_WAVEFORM_CAPTURING;
+    break;
+  }
+
+  case 0x04U: /* Step-triggered waveform capture */
+  {
+    uint16_t preSamples  = unpack_u16(data, 26);
+    uint16_t postSamples = unpack_u16(data, 28);
+    float    injectIdA   = unpack_f32(data, 30);
+    uint8_t  decimation  = unpack_u8(data, 34);
+    
+    if (preSamples + postSamples > CAN_WAVEFORM_MAX_SAMPLES) {
+      float ratio = (float)preSamples / (float)(preSamples + postSamples);
+      preSamples = (uint16_t)(CAN_WAVEFORM_MAX_SAMPLES * ratio);
+      postSamples = CAN_WAVEFORM_MAX_SAMPLES - preSamples;
+    }
+    if (preSamples == 0U && postSamples == 0U) {
+      preSamples = 64U;
+      postSamples = 128U;
+    }
+    if (decimation == 0U) {
+      decimation = 1U;
+    }
+
+    s_waveformCapture.trigger = CAN_WAVEFORM_TRIG_MANUAL;
+    s_waveformCapture.n_samples = preSamples + postSamples;
+    s_waveformCapture.pre_samples = preSamples;
+    s_waveformCapture.post_samples = postSamples;
+    s_waveformCapture.inject_id_a = injectIdA;
+    s_waveformCapture.ring_idx = 0U;
+    s_waveformCapture.write_idx = 0U; /* Used for post */
+    s_waveformCapture.send_idx = 0U;
+    s_waveformCapture.decimation = decimation;
+    s_waveformCapture.tick_count = 0U;
+    s_waveformCapture.step_applied = false;
+    
+    if (preSamples > 0U) {
+        s_waveformCapture.state = CAN_WAVEFORM_STEP_PRE;
+    } else {
+        s_waveformCapture.step_applied = true;
+        s_waveformCapture.state = CAN_WAVEFORM_STEP_POST;
+    }
     break;
   }
 
@@ -640,6 +746,51 @@ static void CanConfig_ProcessTestCommand(void) {
     MotorControl_Enable(false);
     break;
 
+  case 0x30U: /* Start passive hand-rotation angle monitor */
+    MotorControl_EnableAngleMonitor(true);
+    break;
+
+  case 0x31U: /* Stop passive hand-rotation angle monitor */
+    MotorControl_EnableAngleMonitor(false);
+    break;
+
+  case 0x32U: /* Configure HFI/IPD runtime parameters */
+  {
+    uint8_t hfiEnable = unpack_u8(data, 35);
+    uint8_t candidateCount = unpack_u8(data, 36);
+    uint8_t pulsePairs = unpack_u8(data, 37);
+    uint16_t injectVoltage = unpack_u16(data, 38);
+    uint16_t confidenceMin = unpack_u16(data, 40);
+    uint16_t polarityVoltage = unpack_u16(data, 42);
+    uint8_t polarityPulseCount = unpack_u8(data, 44);
+    uint16_t alignHoldMs = unpack_u16(data, 45);
+
+    s_calibParams.hfi_enable = (hfiEnable != 0U);
+    if (candidateCount > 0U) {
+      s_calibParams.hfi_candidate_count = candidateCount;
+    }
+    if (pulsePairs > 0U) {
+      s_calibParams.hfi_pulse_pairs = pulsePairs;
+    }
+    if (injectVoltage > 0U) {
+      s_calibParams.hfi_inject_voltage_v = (float)injectVoltage * 0.01f;
+    }
+    if (confidenceMin > 0U) {
+      s_calibParams.hfi_confidence_threshold = (float)confidenceMin * 0.001f;
+    }
+    if (polarityVoltage > 0U) {
+      s_calibParams.hfi_polarity_voltage_v = (float)polarityVoltage * 0.01f;
+    }
+    if (polarityPulseCount > 0U) {
+      s_calibParams.hfi_polarity_pulse_count = polarityPulseCount;
+    }
+    if (alignHoldMs > 0U) {
+      s_calibParams.hfi_align_hold_ms = alignHoldMs;
+    }
+    s_calibParams.pending = true;
+    break;
+  }
+
   default:
     break;
   }
@@ -666,6 +817,14 @@ void CanConfig_Init(void) {
   s_calibParams.align_current_a = MOTOR_CFG_ALIGN_CURRENT_A;
   s_calibParams.fw_voltage_threshold = MOTOR_CFG_FW_VOLTAGE_THRESHOLD;
   s_calibParams.speed_ramp_rpm_per_s = MOTOR_CFG_SPEED_RAMP_RPM_PER_S;
+  s_calibParams.hfi_enable = (MOTOR_CFG_ENABLE_HFI_IPD != 0U);
+  s_calibParams.hfi_inject_voltage_v = MOTOR_CFG_HFI_IPD_INJECT_V;
+  s_calibParams.hfi_pulse_pairs = MOTOR_CFG_HFI_IPD_PULSE_PAIRS;
+  s_calibParams.hfi_candidate_count = MOTOR_CFG_HFI_IPD_CANDIDATE_COUNT;
+  s_calibParams.hfi_confidence_threshold = MOTOR_CFG_HFI_IPD_CONFIDENCE_MIN;
+  s_calibParams.hfi_polarity_voltage_v = MOTOR_CFG_HFI_IPD_POLARITY_V;
+  s_calibParams.hfi_polarity_pulse_count = MOTOR_CFG_HFI_IPD_POLARITY_PULSES;
+  s_calibParams.hfi_align_hold_ms = MOTOR_CFG_HFI_IPD_ALIGN_HOLD_MS;
   s_calibParams.pending = false;
   s_calibParams.committed = false;
 
@@ -836,7 +995,9 @@ void CanConfig_AckCalibApplied(void) {
 
 void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
                               float id, float iq, float angle) {
-  if (s_waveformCapture.state != CAN_WAVEFORM_CAPTURING) {
+  if (s_waveformCapture.state != CAN_WAVEFORM_CAPTURING &&
+      s_waveformCapture.state != CAN_WAVEFORM_STEP_PRE &&
+      s_waveformCapture.state != CAN_WAVEFORM_STEP_POST) {
     return;
   }
 
@@ -847,23 +1008,74 @@ void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
   }
   s_waveformCapture.tick_count = 0U;
 
-  uint16_t idx = s_waveformCapture.write_idx;
-  if (idx >= s_waveformCapture.n_samples) {
-    /* Buffer full — stop capturing, ready for sending */
-    s_waveformCapture.state = CAN_WAVEFORM_IDLE;
-    return;
+  if (s_waveformCapture.state == CAN_WAVEFORM_CAPTURING) {
+    uint16_t idx = s_waveformCapture.write_idx;
+    if (idx >= s_waveformCapture.n_samples) {
+      /* Buffer full — stop capturing, ready for sending */
+      s_waveformCapture.state = CAN_WAVEFORM_IDLE;
+      return;
+    }
+
+    can_waveform_sample_t *sample = &s_waveformCapture.samples[idx];
+    sample->channels[0] = ia;
+    sample->channels[1] = ib;
+    sample->channels[2] = ic;
+    sample->channels[3] = vbus;
+    sample->channels[4] = id;
+    sample->channels[5] = iq;
+    sample->channels[6] = angle;
+
+    s_waveformCapture.write_idx = idx + 1U;
   }
+  else if (s_waveformCapture.state == CAN_WAVEFORM_STEP_PRE) {
+    uint16_t idx = s_waveformCapture.ring_idx;
+    can_waveform_sample_t *sample = &s_waveformCapture.samples[idx];
+    sample->channels[0] = ia;
+    sample->channels[1] = ib;
+    sample->channels[2] = ic;
+    sample->channels[3] = vbus;
+    sample->channels[4] = id;
+    sample->channels[5] = iq;
+    sample->channels[6] = angle;
+    
+    idx++;
+    if (idx >= s_waveformCapture.pre_samples) {
+      /* Pre-buffer full, switch to post and apply step */
+      s_waveformCapture.state = CAN_WAVEFORM_STEP_POST;
+      s_waveformCapture.step_applied = true;
+      s_waveformCapture.write_idx = s_waveformCapture.pre_samples;
+      s_waveformCapture.ring_idx = 0U;
+    } else {
+      s_waveformCapture.ring_idx = idx;
+    }
+  }
+  else if (s_waveformCapture.state == CAN_WAVEFORM_STEP_POST) {
+    uint16_t idx = s_waveformCapture.write_idx;
+    if (idx >= s_waveformCapture.n_samples) {
+      /* Post-buffer full, stop capturing and clear step */
+      s_waveformCapture.step_applied = false;
+      s_waveformCapture.state = CAN_WAVEFORM_IDLE;
+      return;
+    }
+    
+    can_waveform_sample_t *sample = &s_waveformCapture.samples[idx];
+    sample->channels[0] = ia;
+    sample->channels[1] = ib;
+    sample->channels[2] = ic;
+    sample->channels[3] = vbus;
+    sample->channels[4] = id;
+    sample->channels[5] = iq;
+    sample->channels[6] = angle;
+    
+    s_waveformCapture.write_idx = idx + 1U;
+  }
+}
 
-  can_waveform_sample_t *sample = &s_waveformCapture.samples[idx];
-  sample->channels[0] = ia;
-  sample->channels[1] = ib;
-  sample->channels[2] = ic;
-  sample->channels[3] = vbus;
-  sample->channels[4] = id;
-  sample->channels[5] = iq;
-  sample->channels[6] = angle;
-
-  s_waveformCapture.write_idx = idx + 1U;
+float CanConfig_GetStepInjectId(void) {
+    if (s_waveformCapture.step_applied) {
+        return s_waveformCapture.inject_id_a;
+    }
+    return 0.0f;
 }
 
 can_waveform_state_t CanConfig_GetWaveformState(void) {

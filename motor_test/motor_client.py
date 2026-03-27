@@ -25,7 +25,10 @@ class MotorState(IntEnum):
     ALIGN = 4
     OPEN_LOOP_RAMP = 5
     CLOSED_LOOP = 6
-    FAULT = 7
+    PARAM_IDENT = 7
+    FAULT = 8
+    ANGLE_MONITOR = 9
+    HFI_IPD = 10
 
 
 class MotorFault(IntEnum):
@@ -77,8 +80,20 @@ class MotorTelemetry:
     pcb_temperature: float
     chip_temperature: float
     startup_retry_count: int
+    hfi_active: bool
+    hfi_angle_valid: bool
+    hfi_used: bool
+    hfi_fallback_reason: int
+    hfi_angle_rad: float
+    hfi_confidence: float
+    hfi_ripple_metric: float
     state_time_ms: int
     stall_div_count: int
+    angle_mon_active: bool
+    angle_mon_valid: bool
+    angle_mon_angle_rad: float
+    angle_mon_speed_rad_s: float
+    angle_mon_bemf_mag: int
 
 
 class MotorClient:
@@ -205,6 +220,44 @@ class MotorClient:
         signals["CalibMaxIqA"] = min(signals["CalibMaxIqA"], self.MAX_SAFE_IQ_A)
         self.can.send_message("PC_CalibWrite", signals)
 
+    def configure_hfi(
+        self,
+        enable: Optional[bool] = None,
+        candidate_count: Optional[int] = None,
+        pulse_pairs: Optional[int] = None,
+        inject_v: Optional[float] = None,
+        confidence_min: Optional[float] = None,
+        polarity_v: Optional[float] = None,
+        polarity_pulse_count: Optional[int] = None,
+        align_hold_ms: Optional[int] = None,
+    ) -> None:
+        """Configure runtime HFI/IPD parameters via PC_TestCommand."""
+        current = self.can.get_all_signals()
+        self.can.send_message("PC_TestCommand", {
+            "TcCommandType": 0x32,
+            "TcNSamples": 0,
+            "TcDecimation": 0,
+            "TcTriggerSource": 0,
+            "TcIdentPolePairs": 0,
+            "TcIdentTargetRpm": 0.0,
+            "TcIdentTestCurrentA": 0.0,
+            "TcIdentIqMinA": 0.0,
+            "TcIdentIqMaxA": 0.0,
+            "TcIdentIqStepA": 0.0,
+            "TcStepPreSamples": 0,
+            "TcStepPostSamples": 0,
+            "TcStepInjectIdA": 0.0,
+            "TcStepDecimation": 0,
+            "TcHfiEnable": 1 if (enable if enable is not None else bool(int(current.get("ActiveHfiFlags", 0)) & 0x01)) else 0,
+            "TcHfiCandidateCount": candidate_count if candidate_count is not None else int(current.get("ActiveHfiCandidateCount", 4)),
+            "TcHfiPulsePairs": pulse_pairs if pulse_pairs is not None else int(current.get("ActiveHfiPulsePairs", 8)),
+            "TcHfiInjectV": inject_v if inject_v is not None else current.get("ActiveHfiInjectV", 1.2),
+            "TcHfiConfidenceMin": confidence_min if confidence_min is not None else current.get("ActiveHfiConfidenceMin", 0.12),
+            "TcHfiPolarityV": polarity_v if polarity_v is not None else current.get("ActiveHfiPolarityV", 1.8),
+            "TcHfiPolarityPulseCount": polarity_pulse_count if polarity_pulse_count is not None else int(current.get("ActiveHfiPolarityPulseCount", 6)),
+            "TcHfiAlignHoldMs": align_hold_ms if align_hold_ms is not None else int(current.get("ActiveHfiAlignHoldMs", 40)),
+        })
+
     # ── Telemetry ───────────────────────────────────────────────────────────
 
     def get_telemetry(self) -> MotorTelemetry:
@@ -240,8 +293,20 @@ class MotorClient:
             pcb_temperature=s.get("PcbTemperature", 0.0),
             chip_temperature=s.get("ChipTemperature", 0.0),
             startup_retry_count=int(s.get("StartupRetryCount", 0)),
+            hfi_active=bool(int(s.get("HfiFlags", 0)) & 0x01),
+            hfi_angle_valid=bool(int(s.get("HfiFlags", 0)) & 0x02),
+            hfi_used=bool(int(s.get("HfiFlags", 0)) & 0x04),
+            hfi_fallback_reason=int(s.get("HfiFallbackReason", 0)),
+            hfi_angle_rad=s.get("HfiAngle", 0.0),
+            hfi_confidence=s.get("HfiConfidence", 0.0),
+            hfi_ripple_metric=s.get("HfiRippleMetric", 0.0),
             state_time_ms=int(s.get("StateTimeMs", 0)),
             stall_div_count=int(s.get("StallDivCount", 0)),
+            angle_mon_active=bool(int(s.get("AngleMonFlags", 0)) & 0x01),
+            angle_mon_valid=bool(int(s.get("AngleMonFlags", 0)) & 0x02),
+            angle_mon_angle_rad=s.get("AngleMonAngle", 0.0),
+            angle_mon_speed_rad_s=s.get("AngleMonSpeedRadS", 0.0),
+            angle_mon_bemf_mag=int(s.get("AngleMonBemfMag", 0)),
         )
 
     @property
@@ -494,6 +559,24 @@ class MotorClient:
         """Read number of captured waveform samples."""
         return int(self.can.get_all_signals().get("WaveformSampleCount", 0))
 
+    def start_angle_monitor(self) -> None:
+        """Enable passive BEMF angle monitoring for hand rotation."""
+        self.can.send_message("PC_TestCommand", {
+            "TcCommandType": 0x30,
+            "TcNSamples": 0,
+            "TcDecimation": 0,
+            "TcTriggerSource": 0,
+        })
+
+    def stop_angle_monitor(self) -> None:
+        """Disable passive BEMF angle monitoring."""
+        self.can.send_message("PC_TestCommand", {
+            "TcCommandType": 0x31,
+            "TcNSamples": 0,
+            "TcDecimation": 0,
+            "TcTriggerSource": 0,
+        })
+
     def capture_waveform(
         self,
         n_samples: int = 128,
@@ -516,6 +599,44 @@ class MotorClient:
             if ws != 1:  # Not CAPTURING
                 break
             time.sleep(0.01)
+
+        return self._download_waveform(capture_timeout, send_timeout)
+
+    def capture_step_waveform(
+        self,
+        pre_samples: int = 64,
+        post_samples: int = 128,
+        inject_id_a: float = 1.0,
+        decimation: int = 1,
+        capture_timeout: float = 5.0,
+        send_timeout: float = 30.0,
+    ) -> List[Dict[str, float]]:
+        """
+        Trigger a step-synchronous waveform capture (TestCommand 0x04).
+        """
+        self.can.send_message("PC_TestCommand", {
+            "TcCommandType": 0x04,
+            "TcStepPreSamples": pre_samples,
+            "TcStepPostSamples": post_samples,
+            "TcStepInjectIdA": inject_id_a,
+            "TcStepDecimation": decimation,
+        })
+        
+        # Wait for capture to complete (StepPre -> StepPost -> Idle)
+        deadline = time.monotonic() + capture_timeout
+        while time.monotonic() < deadline:
+            ws = self.get_waveform_state()
+            if ws not in (4, 5, 1):
+                break
+            time.sleep(0.01)
+
+        return self._download_waveform(capture_timeout, send_timeout)
+
+    def _download_waveform(
+        self,
+        capture_timeout: float = 5.0,
+        send_timeout: float = 30.0,
+    ) -> List[Dict[str, float]]:
 
         # Request burst send
         self.request_waveform_send()
@@ -555,4 +676,3 @@ class MotorClient:
 
         samples.sort(key=lambda x: x["index"])
         return samples
-

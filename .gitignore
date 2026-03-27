@@ -4,5 +4,7 @@ build
 
 # USER IGNORE BEGIN
 *.csv
+*.pyc
+test_records
 
 # USER IGNORE END

@@ -147,12 +147,12 @@
 #define MOTOR_CFG_VBUS_OVERVOLTAGE_V (18.0f)
 
 /* Startup timeout before declaring a fault, in milliseconds.
- * 鼓风机叶轮惯量大，开环锁定需要更多时间，放宽到 1.5s 给观测器更多收敛机会。 */
-#define MOTOR_CFG_STARTUP_TIMEOUT_MS (1500U)
+ * 鼓风机叶轮惯量大，开环锁定需要更多时间，放宽到 2.0s 给观测器更多收敛机会。 */
+#define MOTOR_CFG_STARTUP_TIMEOUT_MS (2000U)
 
 /* Allowed observer phase error during acquisition, in electrical radians.
- * 数据显示相位误差在开环阶段振荡导致锁定失败，放宽到 1.00 rad。 */
-#define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD (1.00f)
+ * 放宽到 1.20 rad 提高首次启动成功率，减少对 retry 的依赖。 */
+#define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD (1.20f)
 
 /* Observer phase error above this value counts as lost lock. */
 #define MOTOR_CFG_OBSERVER_LOSS_PHASE_ERR_RAD (1.20f)
@@ -233,8 +233,8 @@
  * 过高导致转速严重超调、来回振荡。需降低 Ki 防止积分器饱和,
  * 同时降低 Kp 减小比例环节冲击。
  */
-#define MOTOR_CFG_SPEED_KP (0.0030f)
-#define MOTOR_CFG_SPEED_KI (0.0060f)
+#define MOTOR_CFG_SPEED_KP (0.010250f)
+#define MOTOR_CFG_SPEED_KI (0.0010f)
 
 /* Runtime speed-command ramp to avoid large torque steps when changing rpm.
  * 鼓风机叶轮惯量大，过快斜坡容易产生过流，放缓到 600 RPM/s。 */
@@ -248,8 +248,9 @@
 /* D-axis current applied during alignment. */
 #define MOTOR_CFG_ALIGN_CURRENT_A (5.0f)
 
-/* Alignment duration in milliseconds. */
-#define MOTOR_CFG_ALIGN_TIME_MS (500U)
+/* Alignment duration in milliseconds.
+ * 缩短对齐时间，将更多 startup budget 留给开环 sweep。 */
+#define MOTOR_CFG_ALIGN_TIME_MS (300U)
 
 /* Open-loop q-axis current target. It ramps up from the alignment current
  * magnitude. 鼓风机负载力矩小，过大的开环电流导致闭环切换后积分器
@@ -265,11 +266,12 @@
 /* Closed-loop phase blend duration in milliseconds. */
 #define MOTOR_CFG_CLOSED_LOOP_BLEND_MS (300U)
 
-/* ======================== Startup Retry / Stall Detect ===================== */
+/* ======================== Startup Retry / Stall Detect =====================
+ */
 
 /** @brief Maximum number of automatic startup retries before hard fault.
- * Set to 0 to disable retry (original timeout → fault behavior). */
-#define MOTOR_CFG_STARTUP_MAX_RETRIES (3U)
+ * 实机测试阶段禁用自动重试，启动失败直接报 FAULT 便于定位问题。 */
+#define MOTOR_CFG_STARTUP_MAX_RETRIES (0U)
 
 /** @brief Q-axis current increment per retry attempt (A).
  * Each retry adds this much Iq on top of the base open-loop current.
@@ -298,12 +300,16 @@
 #define MOTOR_CFG_ENABLE_WIND_DETECT (1U)
 
 /** @brief Wind detect observer settling timeout (ms).
- * 鼓风机叶轮惯量大，停机后仍可能高速旋转，给观察器更多收敛时间。 */
-#define MOTOR_CFG_WIND_DETECT_TIMEOUT_MS (1000U)
+ * 快启停场景下缩短风检等待，停机后叶轮基本已减速。 */
+#define MOTOR_CFG_WIND_DETECT_TIMEOUT_MS (300U)
 
-/** @brief Electrical speed below which the rotor is considered standstill
- * (rad/s). 提高阈值防止观测器噪声产生的虚假速度触发 CatchSpin。 */
-#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S (120.0f)
+/** @brief Mechanical RPM below which the rotor is treated as standstill during
+ * wind detection. 实测表明 200 RPM 以上才能可靠捕获，设 150 RPM 留余量。 */
+#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM (150.0f)
+
+/** @brief Derived electrical speed standstill threshold (rad/s). */
+#define MOTOR_CFG_WIND_DETECT_STANDSTILL_RAD_S                                 \
+  MOTOR_CFG_MECH_RPM_TO_ELEC_RAD_S(MOTOR_CFG_WIND_DETECT_STANDSTILL_RPM)
 
 /** @brief Number of consecutive speed-loop samples with stable speed to declare
  * convergence. 增加到 120 要求观测器速度持续稳定 120ms 才决策，过滤短暂噪声。
@@ -315,8 +321,8 @@
 #define MOTOR_CFG_WIND_DETECT_SPEED_TOL_RAD_S (20.0f)
 
 /** @brief Maximum mechanical RPM for direct tailwind catch. Above this, brake
- * first. */
-#define MOTOR_CFG_CATCH_MAX_SPEED_RPM (300.0f)
+ * first. 提高到 2000 RPM 使大部分顺风场景都能直接闭环。 */
+#define MOTOR_CFG_CATCH_MAX_SPEED_RPM (2000.0f)
 
 /** @brief Electrical speed threshold for coast-down to transition to Align
  * (rad/s). Set below the wind-detect standstill threshold so the motor is
@@ -340,6 +346,13 @@
 /** @brief Minimum observer flux magnitude (Vs) to trust speed estimate for
  * CatchSpin. 当磁链幅值低于此阈值时，认为观测器速度为噪声而非真实转动。 */
 #define MOTOR_CFG_WIND_DETECT_MIN_FLUX_VS (MOTOR_CFG_FLUX_LINKAGE_VS * 0.30f)
+
+/** @brief Voltage divider ratio on the BEMF sensing resistor network. */
+#define MOTOR_CFG_BEMF_VOLTAGE_DIVIDER (5.0f)
+
+/** @brief Minimum BEMF zero crossings needed for a valid speed estimate.
+ * 一个电周期有 6 个过零（3 相 × 上升+下降），6 个过零 = 1 整周期。 */
+#define MOTOR_CFG_WIND_DETECT_MIN_CROSSINGS (6U)
 
 /* ============================== Field Weakening ============================
  */

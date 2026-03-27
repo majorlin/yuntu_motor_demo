@@ -99,6 +99,19 @@ typedef struct
 } motor_foc_state_t;
 
 /**
+ * @brief Runtime-overridable current-loop PI gains.
+ *
+ * Defaults to the compile-time values from motor_user_config.h.
+ * Can be updated at runtime via CAN calibration for current loop tuning.
+ */
+typedef struct {
+    float id_kp;    /**< D-axis current PI proportional gain (V/A). */
+    float id_ki;    /**< D-axis current PI integral gain (V/A/s).   */
+    float iq_kp;    /**< Q-axis current PI proportional gain (V/A). */
+    float iq_ki;    /**< Q-axis current PI integral gain (V/A/s).   */
+} motor_foc_current_gains_t;
+
+/**
  * @brief Initialise the FOC state to default values.
  * @param[in,out] state  Pointer to FOC state structure.
  */
@@ -109,6 +122,22 @@ void MotorFoc_Init(motor_foc_state_t *state);
  * @param[in,out] state  Pointer to FOC state structure.
  */
 void MotorFoc_Reset(motor_foc_state_t *state);
+
+/**
+ * @brief Override the current-loop PI gains at runtime.
+ *
+ * The new gains take effect from the next fast-loop iteration.
+ * Pass NULL to revert to compile-time defaults.
+ *
+ * @param[in] gains  New gains, or NULL to restore defaults.
+ */
+void MotorFoc_SetCurrentGains(const motor_foc_current_gains_t *gains);
+
+/**
+ * @brief Get the currently active current-loop PI gains.
+ * @param[out] gains  Pointer to store the active gains.
+ */
+void MotorFoc_GetCurrentGains(motor_foc_current_gains_t *gains);
 
 /**
  * @brief Execute one fast-loop FOC iteration (observer + current PI + SVM).

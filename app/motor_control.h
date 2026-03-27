@@ -25,6 +25,7 @@ typedef enum
     MOTOR_STATE_ALIGN,           /**< Rotor alignment with DC current injected.   */
     MOTOR_STATE_OPEN_LOOP_RAMP,  /**< Ramping speed/current for startup tracking. */
     MOTOR_STATE_CLOSED_LOOP,     /**< Normal sensorless FOC closed-loop operation.*/
+    MOTOR_STATE_PARAM_IDENT,     /**< Offline motor parameter identification.     */
     MOTOR_STATE_FAULT            /**< Drive faulted. Requires disable to reset.   */
 } motor_control_state_t;
 
@@ -199,5 +200,75 @@ uint32_t MotorControl_GetTickMs(void);
  * @return Mechanical RPM measured before startup (positive = forward).
  */
 float MotorControl_GetWindDetectSpeedRpm(void);
+
+/**
+ * @brief Start offline motor parameter identification.
+ *
+ * Can only be called while the motor is stopped (MOTOR_STATE_STOP).
+ * The drive performs offset calibration, then runs the Rs/Ls/λ
+ * identification sequence.  On completion the drive returns to STOP
+ * with the measured parameters available via the ident module API.
+ *
+ * @return true if accepted, false if the motor is not stopped.
+ */
+bool MotorControl_StartParamIdent(void);
+
+/**
+ * @brief Start motor parameter identification with user-provided config.
+ *
+ * Same as MotorControl_StartParamIdent() but uses the caller's
+ * configuration (pole pairs, target RPM, current limits) instead
+ * of compile-time defaults.
+ *
+ * @param cfg  Partial ident config; system fills in timing fields.
+ * @return true if accepted, false if the motor is not stopped.
+ */
+#include "motor_param_ident.h"
+bool MotorControl_StartParamIdentWithConfig(const motor_ident_config_t *cfg);
+
+/**
+ * @brief Snapshot of FOC internal diagnostics for CAN telemetry.
+ *
+ * Exposes observer, PLL, and PI integrator state for real-time logging
+ * and online calibration verification via the CAN FD Status2 message.
+ */
+typedef struct {
+    float observer_angle_rad;        /**< Observer estimated electrical angle.   */
+    float observer_flux_vs;          /**< Adaptive flux-linkage estimate (V·s).  */
+    float pll_speed_rad_s;           /**< PLL estimated electrical speed.        */
+    float phase_error_rad;           /**< Control-to-observer phase error.       */
+    float speed_pi_integrator_a;     /**< Speed PI integrator state (A).         */
+    float id_pi_integrator_v;        /**< D-axis current PI integrator (V).      */
+    float iq_pi_integrator_v;        /**< Q-axis current PI integrator (V).      */
+    float voltage_modulation_ratio;  /**< |Vab|/Vbus modulation ratio.           */
+    float fw_id_target_a;            /**< Field weakening d-axis current.        */
+    float open_loop_angle_rad;       /**< Forced open-loop angle.               */
+    float open_loop_speed_rad_s;     /**< Open-loop forced speed.               */
+    float closed_loop_blend;         /**< Closed-loop blend factor [0..1].       */
+    uint32_t state_time_ms;          /**< Time in current state (ms).            */
+    float obs_lock_residual_rad;     /**< Observer lock residual angle.          */
+    uint16_t stall_div_count;        /**< Consecutive stall divergence count.    */
+    float duty_u;                    /**< Phase U PWM duty [0..1].               */
+    float duty_v;                    /**< Phase V PWM duty [0..1].               */
+    float duty_w;                    /**< Phase W PWM duty [0..1].               */
+    /* BEMF wind detection diagnostics */
+    uint16_t bemf_u_raw;             /**< BEMF phase U raw ADC count.            */
+    uint16_t bemf_v_raw;             /**< BEMF phase V raw ADC count.            */
+    uint16_t bemf_w_raw;             /**< BEMF phase W raw ADC count.            */
+    uint16_t bemf_com_raw;           /**< BEMF neutral raw ADC count.            */
+    uint16_t bemf_crossing_count;    /**< Total zero crossings detected.         */
+    int16_t  bemf_detected_rpm;      /**< Estimated mechanical RPM from BEMF.    */
+    int8_t   bemf_phase_sequence;    /**< Phase sequence: +1=fwd, -1=rev, 0=unk. */
+} motor_foc_diagnostics_t;
+
+/**
+ * @brief Populate a FOC diagnostics snapshot from internal state.
+ *
+ * Thread-safe: copies volatile data into the caller-provided struct.
+ * Intended for periodic CAN telemetry (50ms cycle), not ISR context.
+ *
+ * @param[out] diag  Pointer to diagnostics structure to fill.
+ */
+void MotorControl_GetFocDiagnostics(motor_foc_diagnostics_t *diag);
 
 #endif /* MOTOR_CONTROL_H */

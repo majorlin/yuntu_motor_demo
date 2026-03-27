@@ -5,12 +5,15 @@
 
 #include "motor_control.h"
 
+#include <stdint.h>
 #include <string.h>
 
+#include "can_config.h"
+#include "device_registers.h"
 #include "motor_foc.h"
 #include "motor_hw_ytm32.h"
+#include "motor_param_ident.h"
 #include "motor_user_config.h"
-#include "can_config.h"
 #include "sdk_project_config.h"
 
 #define MOTOR_CTRL_DWT_LAR_KEY (0xC5ACCE55UL)
@@ -53,12 +56,12 @@ typedef struct {
   bool windCatchActive;           /* Tailwind catch in progress */
 
   /* BEMF voltage zero-crossing detection (for passive wind detect) */
-  int8_t   bemfSignPrev[3];       /* Previous sign of each BEMF phase (-1/0/+1) */
+  int8_t bemfSignPrev[3]; /* Previous sign of each BEMF phase (-1/0/+1) */
   uint32_t bemfZeroCrossingCount; /* Total zero crossings detected */
   uint32_t bemfFirstCrossingTick; /* ISR tick of the first zero crossing */
   uint32_t bemfLastCrossingTick;  /* ISR tick of the most recent crossing */
-  uint32_t bemfIsrTickCounter;    /* Running ISR tick counter during wind detect */
-  int8_t   bemfPhaseSequence;     /* +1 = forward, -1 = reverse, 0 = unknown */
+  uint32_t bemfIsrTickCounter; /* Running ISR tick counter during wind detect */
+  int8_t bemfPhaseSequence;    /* +1 = forward, -1 = reverse, 0 = unknown */
 
   /* Last BEMF raw values (cached from ISR for telemetry) */
   uint16_t bemfLastU;
@@ -74,6 +77,9 @@ typedef struct {
   uint8_t startupRetryCount;   /* Current retry attempt number */
   float startupIqBoostA;       /* Accumulated Iq boost for retries (A) */
   uint32_t stallAngleDivCount; /* Consecutive angle-divergence counter */
+
+  /* Parameter identification */
+  bool paramIdentRequested; /* Trigger flag for param ident after offset cal */
 } motor_control_ctx_t;
 
 static motor_control_ctx_t s_motorCtrl;
@@ -211,16 +217,7 @@ static void MotorControl_SetState(motor_control_state_t nextState) {
   s_motorCtrl.stateTimeMs = 0U;
 }
 
-/**
- * @brief Convert raw ADC count to current (A) based on board configuration.
- * @param rawValue   ADC reading (12-bit).
- * @param rawOffset  Average ADC zero-current offset.
- * @return Calibrated phase current in amperes.
- */
-static inline float MotorControl_CurrentFromRaw(uint16_t rawValue,
-                                                float rawOffset) {
-  return ((float)rawValue - rawOffset) * MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
-}
+
 
 /**
  * @brief Return sign multiplier for mechanical directions (-1.0f or 1.0f).
@@ -577,8 +574,7 @@ static void MotorControl_UpdateWindDetectState(void) {
     return; /* Division by zero guard */
   }
 
-  const float timeWindowS =
-      (float)tickSpan * MOTOR_CFG_FAST_LOOP_DT_S;
+  const float timeWindowS = (float)tickSpan * MOTOR_CFG_FAST_LOOP_DT_S;
   const float crossingsPerSec =
       (float)(s_motorCtrl.bemfZeroCrossingCount - 1U) / timeWindowS;
   /* 6 crossings per electrical cycle (3 phases × 2 edges) */
@@ -599,7 +595,8 @@ static void MotorControl_UpdateWindDetectState(void) {
   }
 
   /* Determine detected direction from BEMF phase sequence. */
-  s_motorCtrl.windDetectDirection = (s_motorCtrl.bemfPhaseSequence >= 0) ? 1 : -1;
+  s_motorCtrl.windDetectDirection =
+      (s_motorCtrl.bemfPhaseSequence >= 0) ? 1 : -1;
 
   /* Always restore ADC to current sensing before leaving wind detect */
   MotorHwYtm32_SwitchAdcToCurrentSensing();
@@ -891,6 +888,22 @@ static void MotorControl_HandleSlowLoop(void) {
     MotorControl_UpdateClosedLoopState();
     break;
 
+  case MOTOR_STATE_PARAM_IDENT:
+    MotorParamIdent_RunSlowLoop();
+    /* Check if identification finished or errored */
+    {
+      motor_ident_phase_t identPhase = MotorParamIdent_GetPhase();
+      if (identPhase == MOTOR_IDENT_PHASE_COMPLETE ||
+          identPhase == MOTOR_IDENT_PHASE_ERROR) {
+        /* Disable motor so it stays in STOP (IDLE) after ident */
+        s_motorCtrl.enableRequest = false;
+        s_motorCtrl.status.enabled = false;
+        MotorControl_EnterStop();
+      }
+      /* DRAG_FAIL is transient — module retries internally */
+    }
+    break;
+
   case MOTOR_STATE_FAULT:
   default:
     break;
@@ -914,6 +927,7 @@ void MotorControl_Init(void) {
   s_motorCtrl.status.enabled = s_motorCtrl.enableRequest;
 
   MotorFoc_Init(&s_motorCtrl.foc);
+  MotorParamIdent_Init();
   MotorHwYtm32_Init();
   MotorHwYtm32_SetOutputsMasked(true);
 #if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
@@ -1024,6 +1038,37 @@ float MotorControl_GetWindDetectSpeedRpm(void) {
   return MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(s_motorCtrl.windDetectSpeedRadS);
 }
 
+bool MotorControl_StartParamIdent(void) {
+  /* Use compile-time defaults for backward compatibility */
+  motor_ident_config_t defaultCfg;
+  defaultCfg.pole_pairs = MOTOR_CFG_POLE_PAIRS;
+  defaultCfg.target_mech_rpm = 300.0f;
+  defaultCfg.test_current_a = MOTOR_CFG_ALIGN_CURRENT_A * 0.4f;
+  defaultCfg.lambda_iq_min_a = 0.3f;
+  defaultCfg.lambda_iq_max_a = 2.0f;
+  defaultCfg.lambda_iq_step_a = 0.2f;
+  return MotorControl_StartParamIdentWithConfig(&defaultCfg);
+}
+
+/* Stored ident configuration from CAN or defaults */
+static motor_ident_config_t s_pendingIdentCfg;
+
+bool MotorControl_StartParamIdentWithConfig(const motor_ident_config_t *cfg) {
+  bool accepted = false;
+
+  SDK_ENTER_CRITICAL();
+  if (s_motorCtrl.status.state == MOTOR_STATE_STOP) {
+    s_pendingIdentCfg = *cfg;
+    s_motorCtrl.paramIdentRequested = true;
+    s_motorCtrl.enableRequest = true;
+    s_motorCtrl.status.enabled = true;
+    accepted = true;
+  }
+  SDK_EXIT_CRITICAL();
+
+  return accepted;
+}
+
 void MotorControl_ProfileRecordFocTiming(uint32_t focTotalCycles,
                                          uint32_t observerCycles,
                                          uint32_t currentLoopCycles,
@@ -1042,7 +1087,9 @@ void MotorControl_ProfileRecordFocTiming(uint32_t focTotalCycles,
  * Executed after ADC acquires phase currents and bus voltage.
  */
 void ADC0_IRQHandler(void) {
-  motor_adc_raw_frame_t rawFrame;
+  /* Channel-indexed scatter buffer: FIFO word = [ch_id:16 | adc_val:16].
+   * Writing by channel index avoids dependence on ADC conversion order. */
+  static uint16_t adcSampleBuffer[MOTOR_HW_ADC_BUFFER_SIZE];
   motor_foc_fast_input_t focInput;
   motor_foc_fast_output_t focOutput;
 #if (MOTOR_CFG_ENABLE_DWT_PROFILE != 0U)
@@ -1059,28 +1106,38 @@ void ADC0_IRQHandler(void) {
 #else
   MotorHwYtm32_SetAdcIrqDebugPinHigh();
 #endif
-
-  rawFrame.overrun = false;
-  MotorHwYtm32_ReadTriggeredFrame(&rawFrame);
-  if (rawFrame.overrun) {
-    MotorControl_LatchFault(MOTOR_FAULT_ADC_OVERRUN);
-    goto irq_exit;
+  /* Drain all FIFO entries: scatter each result into the buffer by its
+   * channel index (upper 16 bits), keeping the 12-bit value (lower 16). */
+  for (uint8_t i = 0; i < MOTOR_HW_ADC_SEQ_LEN; i++) {
+    const uint32_t fifoWord = ADC0->FIFO;
+    adcSampleBuffer[fifoWord >> 16] = (uint16_t)fifoWord;
   }
+  ADC0->STS = ADC_STS_EOSEQ_MASK | ADC_STS_OVR_MASK;
 
-  /* Convert raw ADC values and store directly into status */
-  s_motorCtrl.status.phase_current_a = MotorControl_CurrentFromRaw(
-      rawFrame.current_a_raw, s_motorCtrl.currentOffsetARaw);
-  s_motorCtrl.status.phase_current_b = MotorControl_CurrentFromRaw(
-      rawFrame.current_b_raw, s_motorCtrl.currentOffsetBRaw);
-  s_motorCtrl.status.phase_current_c = MotorControl_CurrentFromRaw(
-      rawFrame.current_c_raw, s_motorCtrl.currentOffsetCRaw);
+  /* Convert raw ADC values → physical units and store into status */
+  s_motorCtrl.status.phase_current_a =
+      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_A_CH] -
+       s_motorCtrl.currentOffsetARaw) *
+      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
+  s_motorCtrl.status.phase_current_b =
+      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_B_CH] -
+       s_motorCtrl.currentOffsetBRaw) *
+      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
+  s_motorCtrl.status.phase_current_c =
+      ((float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_C_CH] -
+       s_motorCtrl.currentOffsetCRaw) *
+      MOTOR_CFG_ADC_COUNT_TO_CURRENT_A;
   s_motorCtrl.status.bus_voltage_v =
-      (float)rawFrame.vbus_raw * MOTOR_CFG_ADC_COUNT_TO_VBUS_V;
+      (float)adcSampleBuffer[MOTOR_HW_ADC_VBUS_CH] *
+      MOTOR_CFG_ADC_COUNT_TO_VBUS_V;
 
   if (s_motorCtrl.status.state == MOTOR_STATE_OFFSET_CAL) {
-    s_motorCtrl.currentOffsetASum += (float)rawFrame.current_a_raw;
-    s_motorCtrl.currentOffsetBSum += (float)rawFrame.current_b_raw;
-    s_motorCtrl.currentOffsetCSum += (float)rawFrame.current_c_raw;
+    s_motorCtrl.currentOffsetASum +=
+        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_A_CH];
+    s_motorCtrl.currentOffsetBSum +=
+        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_B_CH];
+    s_motorCtrl.currentOffsetCSum +=
+        (float)adcSampleBuffer[MOTOR_HW_ADC_CURRENT_C_CH];
     s_motorCtrl.offsetSampleCount++;
 
     if (s_motorCtrl.offsetSampleCount >= MOTOR_CFG_OFFSET_CAL_SAMPLES) {
@@ -1092,11 +1149,27 @@ void ADC0_IRQHandler(void) {
           s_motorCtrl.currentOffsetBSum / sampleCount;
       s_motorCtrl.currentOffsetCRaw =
           s_motorCtrl.currentOffsetCSum / sampleCount;
+      if (s_motorCtrl.paramIdentRequested) {
+        /* Start param ident with user-provided config */
+        s_motorCtrl.paramIdentRequested = false;
+        motor_ident_config_t identCfg = s_pendingIdentCfg;
+        /* Fill in system / timing fields the GUI can't know */
+        identCfg.voltage_step_v = 2.0f;
+        identCfg.pwm_dt_s = MOTOR_CFG_FAST_LOOP_DT_S;
+        identCfg.slow_dt_s = MOTOR_CFG_SPEED_LOOP_DT_S;
+        identCfg.max_duty_modulation = MOTOR_CFG_SVM_MAX_MODULATION;
+        identCfg.overcurrent_a = MOTOR_CFG_PHASE_OVERCURRENT_A;
+        MotorParamIdent_Start(&identCfg);
+        MotorHwYtm32_SetOutputsMasked(false);
+        s_motorCtrl.outputsUnmasked = true;
+        MotorControl_SetState(MOTOR_STATE_PARAM_IDENT);
+      } else {
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
-      MotorControl_StartWindDetect();
+        MotorControl_StartWindDetect();
 #else
-      MotorControl_StartAlign();
+        MotorControl_StartAlign();
 #endif
+      }
     }
     goto irq_exit;
   }
@@ -1106,25 +1179,41 @@ void ADC0_IRQHandler(void) {
     goto irq_exit;
   }
 
+  /* ---- Parameter identification fast loop (bypasses normal FOC) ---- */
+  if (s_motorCtrl.status.state == MOTOR_STATE_PARAM_IDENT) {
+    motor_ident_fast_input_t identIn;
+    motor_ident_fast_output_t identOut;
+    identIn.phase_current_a = s_motorCtrl.status.phase_current_a;
+    identIn.phase_current_b = s_motorCtrl.status.phase_current_b;
+    identIn.phase_current_c = s_motorCtrl.status.phase_current_c;
+    identIn.bus_voltage_v = s_motorCtrl.status.bus_voltage_v;
+    MotorParamIdent_RunFastLoop(&identIn, &identOut);
+    MotorHwYtm32_ApplyPhaseDuty(identOut.duty_u, identOut.duty_v,
+                                identOut.duty_w);
+    goto irq_exit;
+  }
+
 #if (MOTOR_CFG_ENABLE_WIND_DETECT != 0U)
   /* ---- BEMF voltage wind detection (all MOSFET off, no FOC) ----------- */
   if (s_motorCtrl.status.state == MOTOR_STATE_WIND_DETECT) {
-    motor_bemf_raw_frame_t bemf;
-    MotorHwYtm32_ReadBemfFrame(&bemf);
     s_motorCtrl.bemfIsrTickCounter++;
 
     /* Compute BEMF relative to hardware neutral point.
      * All values are 12-bit unsigned ADC counts; subtraction gives a signed
      * result centred around zero. */
-    const int16_t bemfU = (int16_t)bemf.bemf_u_raw - (int16_t)bemf.bemf_com_raw;
-    const int16_t bemfV = (int16_t)bemf.bemf_v_raw - (int16_t)bemf.bemf_com_raw;
-    const int16_t bemfW = (int16_t)bemf.bemf_w_raw - (int16_t)bemf.bemf_com_raw;
+    int16_t bemf_u_raw = adcSampleBuffer[MOTOR_HW_ADC_BEMF_U_CH];
+    int16_t bemf_v_raw = adcSampleBuffer[MOTOR_HW_ADC_BEMF_V_CH];
+    int16_t bemf_w_raw = adcSampleBuffer[MOTOR_HW_ADC_BEMF_W_CH];
+    int16_t bemf_com_raw = (bemf_u_raw + bemf_v_raw + bemf_w_raw) / 3;
+    const int16_t bemfU = (int16_t)bemf_u_raw - (int16_t)bemf_com_raw;
+    const int16_t bemfV = (int16_t)bemf_v_raw - (int16_t)bemf_com_raw;
+    const int16_t bemfW = (int16_t)bemf_w_raw - (int16_t)bemf_com_raw;
 
     /* Compute current sign for each phase (-1, 0, +1). */
     const int8_t signU = (bemfU > 30) ? 1 : ((bemfU < -30) ? -1 : 0);
     const int8_t signV = (bemfV > 30) ? 1 : ((bemfV < -30) ? -1 : 0);
     const int8_t signW = (bemfW > 30) ? 1 : ((bemfW < -30) ? -1 : 0);
-    const int8_t signs[3] = { signU, signV, signW };
+    const int8_t signs[3] = {signU, signV, signW};
 
     /* Detect zero crossings on each phase. */
     for (uint8_t ph = 0U; ph < 3U; ph++) {
@@ -1142,9 +1231,9 @@ void ADC0_IRQHandler(void) {
          * If U rises then W rises next → reverse (-1). */
         if (signs[ph] > 0) { /* Rising edge */
           if (ph == 0U)
-            s_motorCtrl.bemfPhaseSequence = 1;  /* U rise → expect V next */
+            s_motorCtrl.bemfPhaseSequence = 1; /* U rise → expect V next */
           else if (ph == 1U && s_motorCtrl.bemfPhaseSequence == 1)
-            s_motorCtrl.bemfPhaseSequence = 1;  /* Confirmed forward */
+            s_motorCtrl.bemfPhaseSequence = 1; /* Confirmed forward */
           else if (ph == 2U && s_motorCtrl.bemfPhaseSequence == 1)
             s_motorCtrl.bemfPhaseSequence = -1; /* W rose before V → reverse */
         }
@@ -1155,15 +1244,16 @@ void ADC0_IRQHandler(void) {
     }
 
     /* Cache raw BEMF values for CAN telemetry */
-    s_motorCtrl.bemfLastU   = bemf.bemf_u_raw;
-    s_motorCtrl.bemfLastV   = bemf.bemf_v_raw;
-    s_motorCtrl.bemfLastW   = bemf.bemf_w_raw;
-    s_motorCtrl.bemfLastCom = bemf.bemf_com_raw;
+    s_motorCtrl.bemfLastU = bemf_u_raw;
+    s_motorCtrl.bemfLastV = bemf_v_raw;
+    s_motorCtrl.bemfLastW = bemf_w_raw;
+    s_motorCtrl.bemfLastCom = bemf_com_raw;
 
     /* Store avg BEMF amplitude in observer_flux_vs for debugging. */
     s_motorCtrl.foc.observer_lambda_vs =
         (float)(__builtin_abs(bemfU) + __builtin_abs(bemfV) +
-                __builtin_abs(bemfW)) / 3.0f;
+                __builtin_abs(bemfW)) /
+        3.0f;
 
     goto irq_exit;
   }
@@ -1240,12 +1330,10 @@ void ADC0_IRQHandler(void) {
           : focInput.control_angle_rad;
 
   /* --- Waveform capture hook (Status3 high-speed data) --- */
-  CanConfig_WaveformSample(s_motorCtrl.status.phase_current_a,
-                           s_motorCtrl.status.phase_current_b,
-                           s_motorCtrl.status.phase_current_c,
-                           s_motorCtrl.status.bus_voltage_v,
-                           focOutput.id_a, focOutput.iq_a,
-                           s_motorCtrl.status.electrical_angle_rad);
+  CanConfig_WaveformSample(
+      s_motorCtrl.status.phase_current_a, s_motorCtrl.status.phase_current_b,
+      s_motorCtrl.status.phase_current_c, s_motorCtrl.status.bus_voltage_v,
+      focOutput.id_a, focOutput.iq_a, s_motorCtrl.status.electrical_angle_rad);
 
   /* Un-mask outputs if not yet done.
    * Wind detect exits via BEMF branch (never reaches here).
@@ -1318,14 +1406,12 @@ void MotorControl_GetFocDiagnostics(motor_foc_diagnostics_t *diag) {
   diag->duty_w = 0.0f;
 
   /* BEMF wind detection diagnostics — only meaningful in WIND_DETECT state */
-  diag->bemf_crossing_count =
-      (uint16_t)s_motorCtrl.bemfZeroCrossingCount;
-  diag->bemf_detected_rpm =
-      (int16_t)MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(
-          s_motorCtrl.windDetectSpeedRadS);
+  diag->bemf_crossing_count = (uint16_t)s_motorCtrl.bemfZeroCrossingCount;
+  diag->bemf_detected_rpm = (int16_t)MOTOR_CFG_ELEC_RAD_S_TO_MECH_RPM(
+      s_motorCtrl.windDetectSpeedRadS);
   diag->bemf_phase_sequence = s_motorCtrl.bemfPhaseSequence;
-  diag->bemf_u_raw   = s_motorCtrl.bemfLastU;
-  diag->bemf_v_raw   = s_motorCtrl.bemfLastV;
-  diag->bemf_w_raw   = s_motorCtrl.bemfLastW;
+  diag->bemf_u_raw = s_motorCtrl.bemfLastU;
+  diag->bemf_v_raw = s_motorCtrl.bemfLastV;
+  diag->bemf_w_raw = s_motorCtrl.bemfLastW;
   diag->bemf_com_raw = s_motorCtrl.bemfLastCom;
 }

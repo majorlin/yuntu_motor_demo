@@ -103,7 +103,7 @@ msg_status2 = Message(
     name="MCU_MotorStatus2",
     length=64,
     senders=["MCU"],
-    comment="Observer/PI diagnostics, temperature, profiling. Cycle: 50ms.",
+    comment="Observer/PI diagnostics, temperature, BEMF, param ident telemetry. Cycle: 10ms.",
     is_fd=True,
     signals=[
         sig("ObserverAngle",      0,  16, scale=0.0001, unit="rad",
@@ -139,6 +139,27 @@ msg_status2 = Message(
             comment="PCB board temperature"),
         sig("ChipTemperature",  272,  16, is_signed=True, scale=0.1, unit="degC",
             comment="MCU die temperature from TMU"),
+        # ── BEMF wind detection diagnostics (bytes 36-48) ──
+        sig("BemfURaw",         288,  16, comment="BEMF U raw ADC count"),
+        sig("BemfVRaw",         304,  16, comment="BEMF V raw ADC count"),
+        sig("BemfWRaw",         320,  16, comment="BEMF W raw ADC count"),
+        sig("BemfComRaw",       336,  16, comment="BEMF COM raw ADC count"),
+        sig("BemfCrossingCount",352,  16, comment="Zero-crossing count"),
+        sig("BemfDetectedRpm",  368,  16, is_signed=True, unit="rpm",
+            comment="BEMF-detected mechanical RPM"),
+        sig("BemfPhaseSeq",     384,   8, is_signed=True,
+            comment="Phase sequence: +1=fwd, -1=rev, 0=unknown"),
+        # ── Parameter identification telemetry (bytes 49-63) ──
+        sig("IdentPhase",       392,   8,
+            comment="0=Idle,1=Rs,2=Ls,3=Lambda,4=Complete,5=DragFail,6=Error"),
+        sig("IdentProgress",    400,   8, unit="%",
+            comment="Current phase progress 0-100"),
+        sig("IdentRsOhm",       408,  32, is_float=True, unit="Ohm",
+            comment="Identified stator resistance"),
+        sig("IdentLsH",         440,  32, is_float=True, unit="H",
+            comment="Identified stator inductance"),
+        sig("IdentLambdaVs",    472,  32, is_float=True, unit="Vs",
+            comment="Identified PM flux linkage"),
     ],
 )
 
@@ -303,15 +324,26 @@ msg_test_command = Message(
     is_fd=True,
     signals=[
         sig("TcCommandType",       0,   8,
-            comment="0x01=CaptureStart,0x02=Abort,0x03=Send,0x10=ResetCurrentPI"),
+            comment="0x01=CaptureStart,0x02=Abort,0x03=Send,0x10=ResetCurrentPI,0x20=StartParamIdent,0x21=AbortParamIdent"),
         sig("TcNSamples",          8,  16,
             comment="Number of samples to capture"),
         sig("TcDecimation",       24,   8,
             comment="Decimation factor"),
         sig("TcTriggerSource",    32,   8,
             comment="Trigger source for capture"),
-        sig("TcReserved",         40,  24,
-            comment="Reserved"),
+        # ── Ident config (used when TcCommandType=0x20) ──
+        sig("TcIdentPolePairs",   40,   8,
+            comment="Motor pole pairs (for cmd 0x20)"),
+        sig("TcIdentTargetRpm",   48,  32, is_float=True, unit="rpm",
+            comment="Target mechanical RPM for lambda ident"),
+        sig("TcIdentTestCurrentA",80,  32, is_float=True, unit="A",
+            comment="Rs/Ls test current"),
+        sig("TcIdentIqMinA",     112,  32, is_float=True, unit="A",
+            comment="Lambda Iq initial current"),
+        sig("TcIdentIqMaxA",     144,  32, is_float=True, unit="A",
+            comment="Lambda Iq max current"),
+        sig("TcIdentIqStepA",    176,  32, is_float=True, unit="A",
+            comment="Lambda Iq retry increment"),
     ],
 )
 
@@ -392,6 +424,11 @@ test_vectors = {
         "OpenLoopAngle": 1.5708, "OpenLoopSpeedRadS": 120.0, "ClosedLoopBlend": 1.0000,
         "StateTimeMs": 5000, "ObsLockResidualRad": 0.0500, "StallDivCount": 0,
         "PcbTemperature": 45.0, "ChipTemperature": 62.5,
+        "BemfURaw": 2048, "BemfVRaw": 2100, "BemfWRaw": 1980,
+        "BemfComRaw": 2048, "BemfCrossingCount": 12, "BemfDetectedRpm": 300,
+        "BemfPhaseSeq": 1,
+        "IdentPhase": 4, "IdentProgress": 100,
+        "IdentRsOhm": 0.235, "IdentLsH": 0.000180, "IdentLambdaVs": 0.00530,
     },
     "PC_MotorCommand": {
         "CmdEnable": 1, "CmdControlMode": 0, "CmdDirection": 1,
@@ -422,8 +459,11 @@ test_vectors = {
         "WfCh6_ElecAngle": 1.5708,
     },
     "PC_TestCommand": {
-        "TcCommandType": 1, "TcNSamples": 256,
-        "TcDecimation": 4, "TcTriggerSource": 1, "TcReserved": 0,
+        "TcCommandType": 0x20, "TcNSamples": 0,
+        "TcDecimation": 0, "TcTriggerSource": 0,
+        "TcIdentPolePairs": 4, "TcIdentTargetRpm": 300.0,
+        "TcIdentTestCurrentA": 0.5, "TcIdentIqMinA": 0.3,
+        "TcIdentIqMaxA": 2.0, "TcIdentIqStepA": 0.2,
     },
 }
 

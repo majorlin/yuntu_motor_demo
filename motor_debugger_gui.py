@@ -58,7 +58,8 @@ DEFAULT_DBC = os.path.join(SCRIPT_DIR, "docs", "motor_control.dbc")
 
 STATE_MAP = {
     0: "STOP", 1: "OFFSET_CAL", 2: "WIND_DETECT", 3: "COAST_DOWN",
-    4: "ALIGN", 5: "OPEN_LOOP", 6: "CLOSED_LOOP", 7: "FAULT",
+    4: "ALIGN", 5: "OPEN_LOOP", 6: "CLOSED_LOOP", 7: "PARAM_IDENT",
+    8: "FAULT",
 }
 
 # Background-color hints per state for the banner
@@ -70,7 +71,8 @@ STATE_COLOR_MAP = {
     4: "#f9e2af",    # ALIGN       — yellow
     5: "#fab387",    # OPEN_LOOP   — peach/orange
     6: "#a6e3a1",    # CLOSED_LOOP — green (running OK)
-    7: "#f38ba8",    # FAULT       — red
+    7: "#cba6f7",    # PARAM_IDENT — lavender
+    8: "#f38ba8",    # FAULT       — red
 }
 
 FAULT_MAP = {
@@ -400,6 +402,8 @@ class MotorDebuggerApp:
         ttk.Button(btn_frame, text="📡 Send & Apply", style="Send.TButton",
                    command=self._send_calib_apply).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
+        self._build_param_ident_panel(parent)
+
     # ---- Chart -----------------------------------------------------------
     def _build_chart(self, parent):
         n_subplots = 5
@@ -628,6 +632,7 @@ class MotorDebuggerApp:
         self.disconnect_btn.config(state=tk.DISABLED)
         self.status_var.set("Disconnected.")
         self._log("Disconnected.")
+        self._update_chart(force=True)
 
     def _cleanup_connection(self):
         self.rx_running = False
@@ -760,8 +765,142 @@ class MotorDebuggerApp:
         self.calib_vars["CalibApply"].set(0xFF)
         self._send_calib()
 
+    # ---- Parameter Identification Panel ----------------------------------
+    def _build_param_ident_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text="  🔬 Param Identification  ", padding=8)
+        frame.pack(fill=tk.X, padx=4, pady=4)
+
+        # ── Ident config inputs ──
+        cfg_frame = ttk.Frame(frame)
+        cfg_frame.pack(fill=tk.X, pady=(0, 6))
+        self.ident_cfg_vars = {}
+        ident_cfg_fields = [
+            ("Pole Pairs",  "ident_pp",    "4"),
+            ("Target RPM",  "ident_rpm",   "300"),
+            ("Test Iq (A)", "ident_iq",    "0.5"),
+            ("λ Iq Min",    "ident_iqmin", "0.3"),
+            ("λ Iq Max",    "ident_iqmax", "2.0"),
+            ("λ Iq Step",   "ident_iqstp", "0.2"),
+        ]
+        for i, (label_text, key, default) in enumerate(ident_cfg_fields):
+            row, col = divmod(i, 2)
+            ttk.Label(cfg_frame, text=label_text, width=10, anchor=tk.W).grid(
+                row=row, column=col * 2, sticky=tk.W, padx=2, pady=1)
+            var = tk.StringVar(value=default)
+            self.ident_cfg_vars[key] = var
+            ttk.Entry(cfg_frame, textvariable=var, width=7).grid(
+                row=row, column=col * 2 + 1, sticky=tk.W, padx=2, pady=1)
+
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(btn_frame, text="▶ Start Ident", style="Connect.TButton",
+                   command=self._start_param_ident).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        ttk.Button(btn_frame, text="⏹ Abort", style="Disconnect.TButton",
+                   command=self._abort_param_ident).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        # Phase & progress
+        info_frame = ttk.Frame(frame)
+        info_frame.pack(fill=tk.X)
+
+        ttk.Label(info_frame, text="Phase:", width=10, anchor=tk.W).grid(row=0, column=0, sticky=tk.W, padx=2, pady=1)
+        self.ident_phase_label = ttk.Label(info_frame, text="Idle", style="Val.TLabel", width=14, anchor=tk.W)
+        self.ident_phase_label.grid(row=0, column=1, sticky=tk.W, padx=2, pady=1)
+
+        ttk.Label(info_frame, text="Progress:", width=10, anchor=tk.W).grid(row=1, column=0, sticky=tk.W, padx=2, pady=1)
+        self.ident_progress_label = ttk.Label(info_frame, text="0%", style="Val.TLabel", width=14, anchor=tk.W)
+        self.ident_progress_label.grid(row=1, column=1, sticky=tk.W, padx=2, pady=1)
+
+        # Progress bar
+        self.ident_progressbar = ttk.Progressbar(frame, mode='determinate', maximum=100)
+        self.ident_progressbar.pack(fill=tk.X, pady=(2, 6))
+
+        # Results
+        result_frame = ttk.Frame(frame)
+        result_frame.pack(fill=tk.X)
+
+        result_fields = [
+            ("Rs", "Ω"),
+            ("Ls", "mH"),
+            ("λ",  "mVs"),
+        ]
+        self.ident_result_labels = {}
+        for i, (name, unit) in enumerate(result_fields):
+            ttk.Label(result_frame, text=f"{name}:", width=6, anchor=tk.W).grid(
+                row=i, column=0, sticky=tk.W, padx=2, pady=1)
+            val_lbl = ttk.Label(result_frame, text="---", style="Val.TLabel", width=12, anchor=tk.E)
+            val_lbl.grid(row=i, column=1, sticky=tk.E, padx=2, pady=1)
+            self.ident_result_labels[name] = val_lbl
+            ttk.Label(result_frame, text=unit, style="Unit.TLabel", width=6).grid(
+                row=i, column=2, sticky=tk.W, padx=2, pady=1)
+
+    def _send_test_command(self, cmd_type: int, extra_signals=None):
+        """Send a PC_TestCommand frame with the given command type byte."""
+        if not self.connected or self.bus is None:
+            messagebox.showwarning("Warning", "Not connected.")
+            return
+        try:
+            tc_msg = self.db.get_message_by_name("PC_TestCommand")
+            if extra_signals is None:
+                extra_signals = {}
+            data_dict = {
+                "TcCommandType": cmd_type,
+                "TcNSamples": 0,
+                "TcDecimation": 0,
+                "TcTriggerSource": 0,
+                "TcIdentPolePairs": 0,
+                "TcIdentTargetRpm": 0.0,
+                "TcIdentTestCurrentA": 0.0,
+                "TcIdentIqMinA": 0.0,
+                "TcIdentIqMaxA": 0.0,
+                "TcIdentIqStepA": 0.0,
+            }
+            data_dict.update(extra_signals)
+            data = tc_msg.encode(data_dict)
+            msg = can.Message(
+                arbitration_id=tc_msg.frame_id,
+                data=data,
+                is_extended_id=False,
+                is_fd=True,
+                bitrate_switch=True,
+            )
+            self.bus.send(msg)
+            with self.lock:
+                self.tx_count += 1
+            self._log(f"TX TestCommand: type=0x{cmd_type:02X}")
+        except Exception as e:
+            messagebox.showerror("TX Error", str(e))
+
+    def _start_param_ident(self):
+        """Send TestCommand 0x20 with user ident config."""
+        try:
+            pp  = int(self.ident_cfg_vars["ident_pp"].get())
+            rpm = float(self.ident_cfg_vars["ident_rpm"].get())
+            iq  = float(self.ident_cfg_vars["ident_iq"].get())
+            iq_min  = float(self.ident_cfg_vars["ident_iqmin"].get())
+            iq_max  = float(self.ident_cfg_vars["ident_iqmax"].get())
+            iq_step = float(self.ident_cfg_vars["ident_iqstp"].get())
+        except ValueError:
+            messagebox.showerror("Config Error", "Invalid ident config value.")
+            return
+        self._send_test_command(0x20, {
+            "TcIdentPolePairs": pp,
+            "TcIdentTargetRpm": rpm,
+            "TcIdentTestCurrentA": iq,
+            "TcIdentIqMinA": iq_min,
+            "TcIdentIqMaxA": iq_max,
+            "TcIdentIqStepA": iq_step,
+        })
+
+    def _abort_param_ident(self):
+        """Send TestCommand 0x21 to abort parameter identification."""
+        self._send_test_command(0x21)
+
     # ---- Chart Update ----------------------------------------------------
-    def _update_chart(self, frame_num):
+    def _update_chart(self, frame_num=None, force=False):
+        if not self.connected and not force:
+            return
+
         with self.lock:
             for subplot_idx, sig_name, _, _ in CURVE_DEFS:
                 if sig_name in self.hidden_signals:
@@ -792,6 +931,7 @@ class MotorDebuggerApp:
             for d in self.curve_data.values():
                 d.clear()
             self.t0 = None
+        self._update_chart(force=True)
 
     # ---- Status Update ---------------------------------------------------
     def _schedule_status_update(self):
@@ -819,7 +959,7 @@ class MotorDebuggerApp:
                 text=f"── {state_name} ──", fg=color)
 
             # Show / hide fault detail
-            if state_int == 7:  # FAULT
+            if state_int == 8:  # FAULT
                 fault_int = int(fault_val) if fault_val is not None else 0
                 fault_name = FAULT_MAP.get(fault_int, f"Unknown({fault_int})")
                 self.fault_reason_label.config(text=f"⚠ Fault: {fault_name}")
@@ -863,6 +1003,48 @@ class MotorDebuggerApp:
                 txt = str(val)
 
             label_widget.config(text=txt)
+
+        # ── Update parameter identification panel ──
+        ident_phase_val = signals.get("IdentPhase")
+        ident_progress_val = signals.get("IdentProgress")
+        ident_rs = signals.get("IdentRsOhm")
+        ident_ls = signals.get("IdentLsH")
+        ident_lambda = signals.get("IdentLambdaVs")
+
+        if ident_phase_val is not None:
+            ident_phase_names = {
+                0: "Idle", 1: "Rs (Resistance)", 2: "Ls (Inductance)",
+                3: "λ (Flux Linkage)", 4: "✅ Complete",
+                5: "⚠ Drag Retry", 6: "❌ Error",
+            }
+            phase_int = int(ident_phase_val)
+            phase_text = ident_phase_names.get(phase_int, f"?({phase_int})")
+            self.ident_phase_label.config(text=phase_text)
+
+            # Color the phase label
+            phase_colors = {
+                0: "#6c7086", 1: "#fab387", 2: "#89dceb",
+                3: "#cba6f7", 4: "#a6e3a1", 5: "#f9e2af", 6: "#f38ba8",
+            }
+            self.ident_phase_label.config(foreground=phase_colors.get(phase_int, "#cdd6f4"))
+
+        if ident_progress_val is not None:
+            prog = int(ident_progress_val)
+            self.ident_progress_label.config(text=f"{prog}%")
+            self.ident_progressbar['value'] = prog
+
+        if ident_rs is not None:
+            rs_val = float(ident_rs)
+            self.ident_result_labels["Rs"].config(
+                text=f"{rs_val:.4f}" if rs_val > 0 else "---")
+        if ident_ls is not None:
+            ls_val = float(ident_ls)
+            self.ident_result_labels["Ls"].config(
+                text=f"{ls_val * 1000.0:.4f}" if ls_val > 0 else "---")
+        if ident_lambda is not None:
+            lam_val = float(ident_lambda)
+            self.ident_result_labels["λ"].config(
+                text=f"{lam_val * 1000.0:.4f}" if lam_val > 0 else "---")
 
     # ---- Logging ---------------------------------------------------------
     def _log(self, text: str):

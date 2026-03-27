@@ -346,18 +346,6 @@
  * CatchSpin. 当磁链幅值低于此阈值时，认为观测器速度为噪声而非真实转动。 */
 #define MOTOR_CFG_WIND_DETECT_MIN_FLUX_VS (MOTOR_CFG_FLUX_LINKAGE_VS * 0.30f)
 
-/* --- BEMF voltage sensing ADC channels (for passive wind detection) ---
- * From pin_mux.c:
- *   PTA_1  → ADC0_SE1  → BEMF_U
- *   PTC_3  → ADC0_SE11 → BEMF_V
- *   PTC_2  → ADC0_SE10 → BEMF_W
- *   PTA_0  → ADC0_SE0  → BEMF_COM (virtual neutral)
- * All use a 1/5 resistor divider (4k/1k). */
-#define MOTOR_HW_ADC_BEMF_U_CH   ADC_INPUTCHAN_EXT1
-#define MOTOR_HW_ADC_BEMF_V_CH   ADC_INPUTCHAN_EXT11
-#define MOTOR_HW_ADC_BEMF_W_CH   ADC_INPUTCHAN_EXT10
-#define MOTOR_HW_ADC_BEMF_COM_CH ADC_INPUTCHAN_EXT0
-
 /** @brief Voltage divider ratio on the BEMF sensing resistor network. */
 #define MOTOR_CFG_BEMF_VOLTAGE_DIVIDER (5.0f)
 

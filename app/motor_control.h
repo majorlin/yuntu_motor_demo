@@ -25,6 +25,7 @@ typedef enum
     MOTOR_STATE_ALIGN,           /**< Rotor alignment with DC current injected.   */
     MOTOR_STATE_OPEN_LOOP_RAMP,  /**< Ramping speed/current for startup tracking. */
     MOTOR_STATE_CLOSED_LOOP,     /**< Normal sensorless FOC closed-loop operation.*/
+    MOTOR_STATE_PARAM_IDENT,     /**< Offline motor parameter identification.     */
     MOTOR_STATE_FAULT            /**< Drive faulted. Requires disable to reset.   */
 } motor_control_state_t;
 
@@ -199,6 +200,31 @@ uint32_t MotorControl_GetTickMs(void);
  * @return Mechanical RPM measured before startup (positive = forward).
  */
 float MotorControl_GetWindDetectSpeedRpm(void);
+
+/**
+ * @brief Start offline motor parameter identification.
+ *
+ * Can only be called while the motor is stopped (MOTOR_STATE_STOP).
+ * The drive performs offset calibration, then runs the Rs/Ls/λ
+ * identification sequence.  On completion the drive returns to STOP
+ * with the measured parameters available via the ident module API.
+ *
+ * @return true if accepted, false if the motor is not stopped.
+ */
+bool MotorControl_StartParamIdent(void);
+
+/**
+ * @brief Start motor parameter identification with user-provided config.
+ *
+ * Same as MotorControl_StartParamIdent() but uses the caller's
+ * configuration (pole pairs, target RPM, current limits) instead
+ * of compile-time defaults.
+ *
+ * @param cfg  Partial ident config; system fills in timing fields.
+ * @return true if accepted, false if the motor is not stopped.
+ */
+#include "motor_param_ident.h"
+bool MotorControl_StartParamIdentWithConfig(const motor_ident_config_t *cfg);
 
 /**
  * @brief Snapshot of FOC internal diagnostics for CAN telemetry.

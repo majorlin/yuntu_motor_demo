@@ -15,8 +15,16 @@ import os
 import sys
 import threading
 import time
+import types
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
+
+if "asammdf" not in sys.modules:
+    # python-can optionally imports asammdf for MF4 logging support. In this
+    # workstation the installed asammdf/PySide stack aborts during import, but
+    # the CAN test tools do not use MF4 support. A tiny stub forces python-can
+    # to treat MF4 as unavailable instead of crashing the process.
+    sys.modules["asammdf"] = types.ModuleType("asammdf")
 
 import can
 import cantools
@@ -201,7 +209,13 @@ class CanInterface:
         if not self.bus:
             raise RuntimeError("CAN bus not connected")
         db_msg = self.db.get_message_by_name(msg_name)
-        data = db_msg.encode(signals)
+        full_signals = {}
+        for sig in db_msg.signals:
+            if sig.name in signals:
+                full_signals[sig.name] = signals[sig.name]
+            else:
+                full_signals[sig.name] = 0.0 if sig.is_float else 0
+        data = db_msg.encode(full_signals)
         msg = can.Message(
             arbitration_id=db_msg.frame_id,
             data=data,

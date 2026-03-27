@@ -20,8 +20,9 @@ class TestStartupReliability:
 
     @pytest.mark.parametrize("n_cycles", [50])
     def test_005_startup_reliability(self, motor, can, waveform, analyzer, report,
-                                      csv_logger, n_cycles):
+                                      csv_logger, n_cycles, test_logger):
         """重复启动测试: n_cycles次启停循环统计"""
+        log = test_logger
         t0 = time.time()
         can.enable_history()
 
@@ -30,6 +31,9 @@ class TestStartupReliability:
         fault_counts = {}
         startup_times = []
         fail_details = []
+
+        log.step(f"开始 {n_cycles} 次启动可靠性测试")
+        log.info(f"目标转速: 1000 RPM, 超时: 12s")
 
         for i in range(n_cycles):
             iter_t0 = time.monotonic()
@@ -49,12 +53,29 @@ class TestStartupReliability:
                 fault_name = telem.fault.name
                 fault_counts[fault_name] = fault_counts.get(fault_name, 0) + 1
                 fail_details.append(f"#{i+1}: {fault_name} (retries={retries})")
+                log.warn(f"#{i+1}/{n_cycles} 启动失败: {fault_name}")
 
             motor.stop_and_wait(timeout=5.0)
             time.sleep(1.0)
 
+            # Periodic progress log every 10 cycles
+            if (i + 1) % 10 == 0:
+                rate = successes / (i + 1) * 100
+                log.info(f"进度: {i+1}/{n_cycles}, 当前成功率: {rate:.1f}%")
+
         duration = time.time() - t0
         success_rate = successes / n_cycles * 100
+
+        log.step("汇总统计结果")
+        log.data("成功次数", f"{successes}/{n_cycles}")
+        log.data("成功率(%)", f"{success_rate:.1f}")
+        if startup_times:
+            log.data("平均启动时间(s)", f"{np.mean(startup_times):.2f}")
+            log.data("最大启动时间(s)", f"{np.max(startup_times):.2f}")
+        if retries_list:
+            log.data("平均重试次数", f"{np.mean(retries_list):.1f}")
+        for fault, count in fault_counts.items():
+            log.data(f"故障-{fault}", str(count))
 
         # Statistics
         key_signals = {
@@ -72,12 +93,14 @@ class TestStartupReliability:
             key_signals[f"故障-{fault}"] = str(count)
 
         passed = success_rate >= 95.0
+        verdict = TestVerdict.PASS if passed else TestVerdict.FAIL
+        log.print_summary(verdict.value)
 
         record = TestRecord(
             test_id=self.TEST_ID,
             test_name=f"启动可靠性×{n_cycles}",
             description=f"连续{n_cycles}次启停循环，统计启动成功率",
-            verdict=TestVerdict.PASS if passed else TestVerdict.FAIL,
+            verdict=verdict,
             duration_s=duration,
             preconditions="电机静止",
             test_method=f"循环{n_cycles}次: 启动→等待闭环→运行1s→停机→等待1s",
@@ -90,6 +113,8 @@ class TestStartupReliability:
                 "增大 STARTUP_MAX_RETRIES" if any(r > 2 for r in retries_list) else "",
             ],
             waveform_files=[csv_logger],
+            test_steps=log.get_steps(),
+            test_logs=log.get_logs(),
         )
         report.add_record(record)
         can.disable_history()

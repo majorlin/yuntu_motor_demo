@@ -35,8 +35,10 @@
 #define MOTOR_HW_ADC_BEMF_W_CH ADC_INPUTCHAN_EXT10
 #define MOTOR_HW_ADC_BEMF_COM_CH ADC_INPUTCHAN_EXT0
 
-/** Number of channels per ADC conversion sequence (Ia, Ib, Ic, Vbus + BEMF). */
-#define MOTOR_HW_ADC_SEQ_LEN (5U)
+/** Number of channels in the normal current-sensing sequence. */
+#define MOTOR_HW_ADC_CURRENT_SEQ_LEN (4U)
+/** Number of channels in the passive BEMF sensing sequence. */
+#define MOTOR_HW_ADC_BEMF_SEQ_LEN (4U)
 /** Scatter-buffer size — must be >= highest channel index + 1 (EXT11 = 0x0B).
  */
 #define MOTOR_HW_ADC_BUFFER_SIZE (32U)
@@ -140,6 +142,11 @@ bool MotorHwYtm32_ReadSoftwareFrame(motor_adc_raw_frame_t *frame);
  * @return True on success.
  */
 bool MotorHwYtm32_ReadTriggeredFrame(motor_adc_raw_frame_t *frame);
+
+/**
+ * @brief Return the number of ADC FIFO words produced by the active sequence.
+ */
+uint8_t MotorHwYtm32_GetActiveAdcSequenceLength(void);
 
 /**
  * @brief Switch ADC sequence from current sensing to BEMF voltage sensing.

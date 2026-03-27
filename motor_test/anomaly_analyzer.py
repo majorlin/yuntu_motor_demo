@@ -462,8 +462,20 @@ class AnomalyAnalyzer:
             pcb_temperature=record.get("PcbTemperature", 0.0),
             chip_temperature=record.get("ChipTemperature", 0.0),
             startup_retry_count=int(record.get("StartupRetryCount", 0)),
+            hfi_active=bool(int(record.get("HfiFlags", 0)) & 0x01),
+            hfi_angle_valid=bool(int(record.get("HfiFlags", 0)) & 0x02),
+            hfi_used=bool(int(record.get("HfiFlags", 0)) & 0x04),
+            hfi_fallback_reason=int(record.get("HfiFallbackReason", 0)),
+            hfi_angle_rad=record.get("HfiAngle", 0.0),
+            hfi_confidence=record.get("HfiConfidence", 0.0),
+            hfi_ripple_metric=record.get("HfiRippleMetric", 0.0),
             state_time_ms=int(record.get("StateTimeMs", 0)),
             stall_div_count=int(record.get("StallDivCount", 0)),
+            angle_mon_active=bool(int(record.get("AngleMonFlags", 0)) & 0x01),
+            angle_mon_valid=bool(int(record.get("AngleMonFlags", 0)) & 0x02),
+            angle_mon_angle_rad=record.get("AngleMonAngle", 0.0),
+            angle_mon_speed_rad_s=record.get("AngleMonSpeedRadS", 0.0),
+            angle_mon_bemf_mag=int(record.get("AngleMonBemfMag", 0)),
         )
 
     # ── Report ──────────────────────────────────────────────────────────────

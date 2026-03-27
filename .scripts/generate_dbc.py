@@ -14,8 +14,35 @@ Output:
 
 import os
 import sys
+import types
 
-import cantools
+_used_can_stub = False
+
+
+def _import_cantools_with_safe_can_stub():
+    """Import cantools without pulling in python-can's optional MF4/Qt stack.
+
+    cantools' top-level package imports ``tester``, which imports ``can``.
+    In this workstation, ``python-can`` drags in ``asammdf/PySide6`` and aborts
+    before the DBC generator starts. The generator itself only needs the
+    database API, so a tiny ``can`` stub is sufficient.
+    """
+
+    real_can = sys.modules.get("can")
+    can_stub = types.ModuleType("can")
+    can_stub.Listener = type("Listener", (), {})
+
+    try:
+        sys.modules["can"] = can_stub
+        import cantools as imported_cantools
+        return imported_cantools, True
+    finally:
+        if real_can is not None:
+            sys.modules["can"] = real_can
+
+
+cantools, _used_can_stub = _import_cantools_with_safe_can_stub()
+
 from cantools.database import Message, Signal, Database, Node
 from cantools.database.conversion import LinearConversion
 
@@ -54,10 +81,10 @@ msg_status1 = Message(
     name="MCU_MotorStatus1",
     length=64,
     senders=["MCU"],
-    comment="Core motor telemetry: state, fault, RPM, Idq, Vbus, phase currents, PWM duty, timestamp. Cycle: 10ms.",
+    comment="Core motor telemetry: state, fault, RPM, Idq, Vbus, phase currents, PWM duty, timestamp, and passive angle-monitor summary. Cycle: 10ms.",
     is_fd=True,
     signals=[
-        sig("State",              0,   8, comment="Motor state machine (0=Stop..8=Fault)"),
+        sig("State",              0,   8, comment="Motor state machine (0=Stop..8=Fault, 9=AngleMonitor, 10=HFI_IPD)"),
         sig("FaultCode",          8,   8, comment="Active fault code (0=None)"),
         sig("ControlMode",       16,   8, comment="0=Speed, 1=Current"),
         sig("Flags",             24,   8, comment="Bit0=Enabled, Bit1=ObsLocked, Bit2=Direction(1=fwd)"),
@@ -90,6 +117,24 @@ msg_status1 = Message(
         sig("DutyV",            248,  16, scale=0.0001, comment="Phase V PWM duty [0..1]"),
         sig("DutyW",            264,  16, scale=0.0001, comment="Phase W PWM duty [0..1]"),
         sig("Timestamp",        280,  32, unit="ms", comment="System tick milliseconds"),
+        sig("AngleMonFlags",    312,   8,
+            comment="Bit0=active, Bit1=valid, Bit2=direction positive"),
+        sig("AngleMonAngle",    320,  16, scale=0.0001, unit="rad",
+            comment="Passive BEMF monitored electrical angle"),
+        sig("AngleMonSpeedRadS",336,  16, is_signed=True, scale=0.1, unit="rad/s",
+            comment="Passive BEMF monitored electrical speed"),
+        sig("AngleMonBemfMag",  352,  16,
+            comment="Passive BEMF vector magnitude in ADC counts"),
+        sig("HfiFlags",         368,   8,
+            comment="Bit0=active, Bit1=angle_valid, Bit2=used"),
+        sig("HfiFallbackReason",376,   8,
+            comment="0=none,1=disabled,2=vbus,3=confidence,4=repeatability,5=polarity"),
+        sig("HfiAngle",         384,  16, scale=0.0001, unit="rad",
+            comment="HFI estimated initial electrical angle"),
+        sig("HfiConfidence",    400,  16, scale=0.001,
+            comment="HFI final confidence metric [0..1]"),
+        sig("HfiRippleMetric",  416,  16, scale=0.001, unit="A",
+            comment="Best synchronous HFI ripple metric"),
     ],
 )
 
@@ -269,6 +314,22 @@ msg_calib_readback = Message(
             comment="0=Idle,1=Capturing,2=Sending,3=Done"),
         sig("WaveformSampleCount",376, 16,
             comment="Number of waveform samples captured"),
+        sig("ActiveHfiFlags",    392,   8,
+            comment="Bit0=HFI/IPD enabled"),
+        sig("ActiveHfiCandidateCount",400, 8,
+            comment="Active HFI coarse candidate count"),
+        sig("ActiveHfiPulsePairs",408,  8,
+            comment="Active HFI pulse pairs per candidate"),
+        sig("ActiveHfiInjectV",  416,  16, scale=0.01, unit="V",
+            comment="Active HFI bipolar injection voltage"),
+        sig("ActiveHfiConfidenceMin",432, 16, scale=0.001,
+            comment="Active HFI confidence threshold"),
+        sig("ActiveHfiPolarityV",448,  16, scale=0.01, unit="V",
+            comment="Active HFI polarity pulse voltage"),
+        sig("ActiveHfiPolarityPulseCount",464, 8,
+            comment="Active HFI polarity pulse count"),
+        sig("ActiveHfiAlignHoldMs",472, 16, unit="ms",
+            comment="Active short align hold after HFI success"),
     ],
 )
 
@@ -324,7 +385,7 @@ msg_test_command = Message(
     is_fd=True,
     signals=[
         sig("TcCommandType",       0,   8,
-            comment="0x01=CaptureStart,0x02=Abort,0x03=Send,0x10=ResetCurrentPI,0x20=StartParamIdent,0x21=AbortParamIdent"),
+            comment="0x01=CaptureStart,0x02=Abort,0x03=Send,0x10=ResetCurrentPI,0x20=StartParamIdent,0x21=AbortParamIdent,0x30=StartAngleMonitor,0x31=StopAngleMonitor,0x32=ConfigHFI"),
         sig("TcNSamples",          8,  16,
             comment="Number of samples to capture"),
         sig("TcDecimation",       24,   8,
@@ -344,6 +405,32 @@ msg_test_command = Message(
             comment="Lambda Iq max current"),
         sig("TcIdentIqStepA",    176,  32, is_float=True, unit="A",
             comment="Lambda Iq retry increment"),
+        # ── Step Capture config (used when TcCommandType=0x04) ──
+        sig("TcStepPreSamples",  208,  16,
+            comment="Step pre-trigger samples"),
+        sig("TcStepPostSamples", 224,  16,
+            comment="Step post-trigger samples"),
+        sig("TcStepInjectIdA",   240,  32, is_float=True, unit="A",
+            comment="Step D-axis current injection"),
+        sig("TcStepDecimation",  272,   8,
+            comment="Step decimation factor"),
+        # ── HFI/IPD config (used when TcCommandType=0x32) ──
+        sig("TcHfiEnable",      280,   8,
+            comment="0=disable, non-zero=enable static HFI/IPD"),
+        sig("TcHfiCandidateCount",288, 8,
+            comment="Coarse candidate count over [0,pi)"),
+        sig("TcHfiPulsePairs",  296,   8,
+            comment="+/- pulse pairs per candidate"),
+        sig("TcHfiInjectV",     304,  16, scale=0.01, unit="V",
+            comment="Bipolar HFI injection voltage"),
+        sig("TcHfiConfidenceMin",320,16, scale=0.001,
+            comment="Minimum acceptable HFI confidence"),
+        sig("TcHfiPolarityV",   336,  16, scale=0.01, unit="V",
+            comment="Polarity comparison pulse voltage"),
+        sig("TcHfiPolarityPulseCount",352, 8,
+            comment="Polarity comparison pulse count"),
+        sig("TcHfiAlignHoldMs", 360,  16, unit="ms",
+            comment="Short align hold after HFI success"),
     ],
 )
 
@@ -386,6 +473,8 @@ with open(OUTPUT_PATH, "w") as f:
 
 print(f"✅ DBC file written to: {OUTPUT_PATH}")
 print(f"   File size: {os.path.getsize(OUTPUT_PATH)} bytes")
+if _used_can_stub:
+    print("   Note: used lightweight 'can' stub to avoid local python-can/Qt import crash")
 
 # ─── Validation Phase 1: Re-parse ──────────────────────────────────────────────
 
@@ -415,6 +504,10 @@ test_vectors = {
         "StartupRetryCount": 0,
         "DutyU": 0.6500, "DutyV": 0.3200, "DutyW": 0.4100,
         "Timestamp": 123456,
+        "AngleMonFlags": 0x03, "AngleMonAngle": 2.3562,
+        "AngleMonSpeedRadS": 125.0, "AngleMonBemfMag": 96,
+        "HfiFlags": 0x06, "HfiFallbackReason": 0,
+        "HfiAngle": 1.0472, "HfiConfidence": 0.420, "HfiRippleMetric": 0.185,
     },
     "MCU_MotorStatus2": {
         "ObserverAngle": 3.1415, "ObserverFluxVs": 0.005300,
@@ -450,6 +543,10 @@ test_vectors = {
         "ActiveCurrentIdKp": 12.5, "ActiveCurrentIdKi": 2400.0,
         "ActiveCurrentIqKp": 18.0, "ActiveCurrentIqKi": 3600.0,
         "WaveformState": 0, "WaveformSampleCount": 0,
+        "ActiveHfiFlags": 0x01, "ActiveHfiCandidateCount": 4,
+        "ActiveHfiPulsePairs": 8, "ActiveHfiInjectV": 1.20,
+        "ActiveHfiConfidenceMin": 0.120, "ActiveHfiPolarityV": 1.80,
+        "ActiveHfiPolarityPulseCount": 6, "ActiveHfiAlignHoldMs": 40,
     },
     "MCU_MotorStatus3": {
         "WfSampleIndex": 42, "WfTotalSamples": 128,
@@ -464,6 +561,12 @@ test_vectors = {
         "TcIdentPolePairs": 4, "TcIdentTargetRpm": 300.0,
         "TcIdentTestCurrentA": 0.5, "TcIdentIqMinA": 0.3,
         "TcIdentIqMaxA": 2.0, "TcIdentIqStepA": 0.2,
+        "TcStepPreSamples": 0, "TcStepPostSamples": 0,
+        "TcStepInjectIdA": 0.0, "TcStepDecimation": 0,
+        "TcHfiEnable": 1, "TcHfiCandidateCount": 4, "TcHfiPulsePairs": 8,
+        "TcHfiInjectV": 1.20, "TcHfiConfidenceMin": 0.120,
+        "TcHfiPolarityV": 1.80, "TcHfiPolarityPulseCount": 6,
+        "TcHfiAlignHoldMs": 40,
     },
 }
 

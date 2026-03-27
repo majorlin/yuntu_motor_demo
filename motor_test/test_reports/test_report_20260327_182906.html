@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>电机测试报告 - 2026-03-27 18:29:06</title>
+<style>
+  :root {
+    --bg-primary: #0f0f1a;
+    --bg-secondary: #1a1a2e;
+    --bg-card: #16213e;
+    --bg-card-header: #1a1a3e;
+    --border: #2a2a4a;
+    --text-primary: #e0e0f0;
+    --text-secondary: #8888aa;
+    --accent-blue: #4fc3f7;
+    --accent-green: #66bb6a;
+    --accent-red: #ef5350;
+    --accent-yellow: #ffa726;
+    --accent-purple: #ab47bc;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+                 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+  }
+
+  .layout {
+    display: flex;
+    min-height: 100vh;
+  }
+
+  /* ── Sidebar Navigation ── */
+  .sidebar {
+    width: 280px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    padding: 20px 0;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    overflow-y: auto;
+    z-index: 10;
+  }
+
+  .sidebar h2 {
+    color: var(--accent-blue);
+    font-size: 14px;
+    padding: 0 16px 12px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+
+  .nav-item {
+    display: block;
+    padding: 8px 16px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    border-left: 3px solid transparent;
+    transition: all 0.2s;
+  }
+
+  .nav-item:hover {
+    background: rgba(79, 195, 247, 0.08);
+    color: var(--text-primary);
+  }
+
+  .nav-item.pass { border-left-color: var(--accent-green); }
+  .nav-item.fail { border-left-color: var(--accent-red); }
+  .nav-item.skip { border-left-color: var(--accent-yellow); }
+  .nav-item.error { border-left-color: var(--accent-yellow); }
+
+  /* ── Main Content ── */
+  .main {
+    flex: 1;
+    margin-left: 280px;
+    padding: 32px 40px;
+    max-width: 1100px;
+  }
+
+  .report-header {
+    margin-bottom: 32px;
+  }
+
+  .report-header h1 {
+    color: var(--accent-blue);
+    font-size: 24px;
+    margin-bottom: 8px;
+  }
+
+  .report-meta {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.8;
+  }
+
+  /* ── Stats Cards ── */
+  .stats-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+  }
+
+  .stat-card {
+    flex: 1;
+    min-width: 120px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .stat-card .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+  }
+
+  .stat-card .stat-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+
+  .stat-card.total .stat-value { color: var(--accent-blue); }
+  .stat-card.pass .stat-value { color: var(--accent-green); }
+  .stat-card.fail .stat-value { color: var(--accent-red); }
+  .stat-card.rate .stat-value { color: var(--accent-purple); }
+
+  /* ── Summary Table ── */
+  .summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 32px;
+    font-size: 14px;
+  }
+
+  .summary-table th {
+    background: var(--bg-card-header);
+    color: var(--accent-blue);
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 2px solid var(--border);
+    font-weight: 600;
+  }
+
+  .summary-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .summary-table tr:hover {
+    background: rgba(79, 195, 247, 0.04);
+  }
+
+  .summary-table a {
+    color: var(--accent-blue);
+    text-decoration: none;
+  }
+
+  .summary-table a:hover {
+    text-decoration: underline;
+  }
+
+  .info-cell {
+    color: var(--text-secondary);
+    font-size: 12px;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ── Detail Cards ── */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 24px;
+    overflow: hidden;
+  }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .card-header h3 {
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .card-header.pass { border-left: 4px solid var(--accent-green); }
+  .card-header.fail { border-left: 4px solid var(--accent-red); }
+  .card-header.skip { border-left: 4px solid var(--accent-yellow); }
+  .card-header.error { border-left: 4px solid var(--accent-yellow); }
+
+  .badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .badge.pass { background: rgba(102,187,106,0.15); color: var(--accent-green); }
+  .badge.fail { background: rgba(239,83,80,0.15); color: var(--accent-red); }
+  .badge.skip { background: rgba(255,167,38,0.15); color: var(--accent-yellow); }
+  .badge.error { background: rgba(255,167,38,0.15); color: var(--accent-yellow); }
+
+  .card-body {
+    padding: 20px;
+  }
+
+  .info-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+
+  .info-table th {
+    width: 120px;
+    text-align: right;
+    padding: 8px 16px 8px 8px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    vertical-align: top;
+    border-bottom: 1px solid rgba(42,42,74,0.5);
+  }
+
+  .info-table td {
+    padding: 8px;
+    border-bottom: 1px solid rgba(42,42,74,0.5);
+  }
+
+  .pass { color: var(--accent-green); }
+  .fail { color: var(--accent-red); }
+  .skip { color: var(--accent-yellow); }
+  .error { color: var(--accent-yellow); }
+
+  .section {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(42,42,74,0.5);
+  }
+
+  .section h4 {
+    color: var(--accent-blue);
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+
+  /* ── Steps ── */
+  .steps-list {
+    padding-left: 24px;
+    font-size: 14px;
+  }
+
+  .steps-list li {
+    padding: 4px 0;
+    color: var(--text-primary);
+  }
+
+  .steps-list li::marker {
+    color: var(--accent-blue);
+    font-weight: 600;
+  }
+
+  /* ── Data Table ── */
+  .data-table {
+    width: auto;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  .data-table th {
+    background: rgba(26,26,62,0.5);
+    color: var(--accent-blue);
+    padding: 6px 16px;
+    text-align: left;
+    font-weight: 600;
+  }
+
+  .data-table td {
+    padding: 6px 16px;
+    border-bottom: 1px solid rgba(42,42,74,0.3);
+    font-family: 'Menlo', 'Consolas', monospace;
+  }
+
+  /* ── Anomalies & Suggestions ── */
+  .anomaly-list li {
+    color: var(--accent-yellow);
+    font-size: 13px;
+    padding: 2px 0;
+  }
+
+  .suggestion-list li {
+    color: var(--accent-purple);
+    font-size: 13px;
+    padding: 2px 0;
+  }
+
+  /* ── Waveforms ── */
+  .waveform-gallery {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .waveform-item img {
+    max-width: 100%;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+  }
+
+  .waveform-caption {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    text-align: center;
+  }
+
+  .waveform-missing {
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-style: italic;
+  }
+
+  /* ── Log Block ── */
+  .log-block {
+    background: #0a0a14;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-family: 'Menlo', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-x: auto;
+    color: #a0a0c0;
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  details {
+    cursor: pointer;
+  }
+
+  details summary {
+    color: var(--accent-blue);
+    font-size: 14px;
+    padding: 4px 0;
+  }
+
+  details summary:hover {
+    color: var(--text-primary);
+  }
+
+  /* ── Error Block ── */
+  .error-block {
+    margin-top: 12px;
+    padding: 10px 16px;
+    background: rgba(239,83,80,0.08);
+    border-left: 3px solid var(--accent-red);
+    border-radius: 4px;
+    color: var(--accent-red);
+    font-size: 13px;
+  }
+
+  /* ── Section Title ── */
+  .section-title {
+    color: var(--accent-blue);
+    font-size: 18px;
+    margin: 32px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; padding: 16px; }
+    .stats-row { flex-direction: column; }
+  }
+
+  /* ── Pass/Fail row highlights ── */
+  .pass-row td { }
+  .fail-row td { background: rgba(239,83,80,0.04); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <h2>📋 测试导航</h2>
+    
+  </nav>
+
+  <!-- Main Content -->
+  <div class="main">
+    <div class="report-header">
+      <h1>🔧 鼓风机电机测试报告</h1>
+      <div class="report-meta">
+        生成时间: 2026-03-27 18:29:06<br>
+        测试平台: YTM32 Sensorless FOC / CAN FD 500K/2M<br>
+        通信工具: YuntuCanLin Debugger
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-row">
+      <div class="stat-card total">
+        <div class="stat-value">0</div>
+        <div class="stat-label">总计</div>
+      </div>
+      <div class="stat-card pass">
+        <div class="stat-value">0</div>
+        <div class="stat-label">✅ 通过</div>
+      </div>
+      <div class="stat-card fail">
+        <div class="stat-value">0</div>
+        <div class="stat-label">❌ 失败</div>
+      </div>
+      <div class="stat-card rate">
+        <div class="stat-value">0.0%</div>
+        <div class="stat-label">通过率</div>
+      </div>
+    </div>
+
+    <!-- Summary Table -->
+    <h2 class="section-title">测试用例汇总</h2>
+    <table class="summary-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>测试项</th>
+          <th>结果</th>
+          <th>耗时</th>
+          <th>关键信息</th>
+        </tr>
+      </thead>
+      <tbody>
+        
+      </tbody>
+    </table>
+
+    <!-- Detail Cards -->
+    <h2 class="section-title">详细测试记录</h2>
+    
+
+    <footer style="text-align:center; color:var(--text-secondary); font-size:12px; padding:32px 0;">
+      Motor Test Report Generator &copy; Yuntu Motor • 2026-03-27 18:29:06
+    </footer>
+  </div>
+</div>
+</body>
+</html>

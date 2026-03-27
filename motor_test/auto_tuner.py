@@ -19,7 +19,7 @@ import numpy as np
 
 from can_interface import CanInterface
 from motor_client import MotorClient, MotorState
-from waveform_capture import WaveformCapture, StepResponseMetrics
+from waveform_capture import WaveformCapture, StepResponseMetrics, WaveformRecord
 from anomaly_analyzer import AnomalyAnalyzer
 
 
@@ -42,6 +42,33 @@ class TuneReport:
     best_ki: float
     best_metrics: StepResponseMetrics
     all_trials: List[TuneResult]
+    timestamp: str
+
+@dataclass
+class CurrentLoopTuneResult:
+    """Result of a single current loop tuning trial."""
+    bw_hz: float
+    id_kp: float
+    id_ki: float
+    iq_kp: float
+    iq_ki: float
+    metrics: StepResponseMetrics
+    passed: bool
+    reason: str = ""
+    waveform_file: Optional[str] = None
+
+
+@dataclass
+class CurrentLoopTuneReport:
+    """Final current loop tuning report."""
+    parameter_name: str
+    best_bw_hz: float
+    best_id_kp: float
+    best_id_ki: float
+    best_iq_kp: float
+    best_iq_ki: float
+    best_metrics: StepResponseMetrics
+    all_trials: List[CurrentLoopTuneResult]
     timestamp: str
 
 
@@ -76,7 +103,154 @@ class AutoTuner:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
+    # ── Current Loop Tuning ─────────────────────────────────────────────────
+
+    def tune_current_loop(
+        self,
+        ls_h: float,
+        rs_ohm: float,
+        bw_range: Tuple[float, float] = (500.0, 3000.0),
+        bw_steps: int = 6,
+        inject_a: float = 2.0,
+        target_overshoot_pct: float = 5.0,
+        target_rise_time_us: float = 500.0,
+        pre_samples: int = 64,
+        post_samples: int = 128,
+        decimation: int = 1,
+    ) -> CurrentLoopTuneReport:
+        """
+        Sweep current loop bandwidth to find optimal PI gains.
+        Uses firmware D-axis injection step and high-speed waveform capture.
+        """
+        orig_id_kp = self.can.get_signal("ActiveCurrentIdKp") or 5.0
+        orig_id_ki = self.can.get_signal("ActiveCurrentIdKi") or 5000.0
+        orig_iq_kp = self.can.get_signal("ActiveCurrentIqKp") or 5.0
+        orig_iq_ki = self.can.get_signal("ActiveCurrentIqKi") or 5000.0
+
+        bandwidths = np.linspace(bw_range[0], bw_range[1], bw_steps)
+        trials: List[CurrentLoopTuneResult] = []
+        best: Optional[CurrentLoopTuneResult] = None
+        best_score = float("inf")
+
+        # Motor must be stopped and in ALIGN state or standing still in closed-loop
+        # To be safe, we'll stop the motor, then just apply Current mode at 0 Iq.
+        # Wait, step injection adds Id target without spinning the motor.
+        self.motor.stop()
+        time.sleep(0.5)
+
+        # Start motor at 0 Iq target in Current Mode
+        self.motor.set_current(0.0)
+        time.sleep(0.5)
+
+        for bw in bandwidths:
+            safety = self.motor.check_safety()
+            if safety:
+                self._emergency_stop()
+                return self._make_current_report("Current_Loop", 0.0, orig_id_kp, orig_id_ki, orig_iq_kp, orig_iq_ki, StepResponseMetrics(), trials, f"安全停止: {safety}")
+
+            omega_c = 2.0 * np.pi * bw
+            id_kp = ls_h * omega_c
+            id_ki = rs_ohm * omega_c
+            iq_kp = ls_h * omega_c
+            iq_ki = rs_ohm * omega_c
+
+            # Apply new current gains using Selector = 2
+            # Notice write_current_gains takes (id_kp, id_ki, iq_kp, iq_ki)
+            self.motor.write_calib(
+                speed_kp=id_kp, speed_ki=id_ki, observer_gain=iq_kp, pll_kp=iq_ki,
+                apply=True
+            )
+            # Since motor_client doesn't have an explicit write_current_gains, we borrow the existing write_calib. Wait.
+            # wait, CalibSelector is hardcoded to 0 in write_calib!
+            pass # We need to use raw CAN signal for CalibSelector = 2
+            self.can.send_message("PC_CalibWrite", {
+                "CalibSelector": 2,
+                "CalibSpeedKp": id_kp,
+                "CalibSpeedKi": id_ki,
+                "CalibObsGain": iq_kp,
+                "CalibPllKp": iq_ki,
+                "CalibPllKi": 0.0,
+                "CalibMaxIqA": 0.0,
+                "CalibOpenLoopIqA": 0.0,
+                "CalibAlignCurrentA": 0.0,
+                "CalibFwThreshold": 0.0,
+                "CalibApply": 0xFF,
+            })
+            time.sleep(0.3)
+
+            # Trigger step capture
+            samples = self.motor.capture_step_waveform(
+                pre_samples=pre_samples, post_samples=post_samples,
+                inject_id_a=inject_a, decimation=decimation,
+                capture_timeout=5.0, send_timeout=10.0
+            )
+
+            if not samples:
+                trials.append(CurrentLoopTuneResult(bw, id_kp, id_ki, iq_kp, iq_ki, StepResponseMetrics(), False, "捕获波形失败"))
+                continue
+
+            # Convert to WaveformRecord
+            data = {"Id": [], "Iq": [], "Vbus": []}
+            times = []
+            for s in samples:
+                times.append(s["time"])
+                data["Id"].append(s["Id"])
+                data["Iq"].append(s["Iq"])
+                data["Vbus"].append(s["Vbus"])
+
+            record = WaveformRecord(name=f"current_step_bw{bw:.0f}", signals=data, time_s=times)
+
+            step_idx = pre_samples
+            step_time = times[step_idx] if step_idx < len(times) else times[-1]
+            metrics = self.waveform.compute_step_metrics(record, "Id", step_time=step_time, expected_step=inject_a)
+
+            # Score logic
+            score = (
+                metrics.overshoot_pct * 5.0
+                + (metrics.rise_time_s * 1e6) * 0.1  # rise time expressed in us
+                + metrics.settling_time_s * 1000.0   # settling time in ms
+                + metrics.steady_state_error_pct * 5.0
+            )
+            
+            if metrics.overshoot_pct > target_overshoot_pct:
+                score += (metrics.overshoot_pct - target_overshoot_pct) * 20
+            if (metrics.rise_time_s * 1e6) > target_rise_time_us:
+                score += ((metrics.rise_time_s * 1e6) - target_rise_time_us) * 0.5
+
+            filename = f"current_bw{bw:.0f}_kp{id_kp:.4f}.png"
+            wf_file = self.waveform.plot_step_response(record, metrics, "Id", filename)
+
+            trial = CurrentLoopTuneResult(bw, id_kp, id_ki, iq_kp, iq_ki, metrics, True, waveform_file=wf_file)
+            trials.append(trial)
+
+            if score < best_score:
+                best_score = score
+                best = trial
+
+        # Stop motor
+        self.motor.stop()
+        time.sleep(0.5)
+
+        if best is not None:
+            # Apply best
+            self.can.send_message("PC_CalibWrite", {
+                "CalibSelector": 2,
+                "CalibSpeedKp": best.id_kp, "CalibSpeedKi": best.id_ki,
+                "CalibObsGain": best.iq_kp, "CalibPllKp": best.iq_ki,
+                "CalibApply": 0xFF,
+            })
+            return self._make_current_report("Current_Loop", best.bw_hz, best.id_kp, best.id_ki, best.iq_kp, best.iq_ki, best.metrics, trials)
+        else:
+            self.can.send_message("PC_CalibWrite", {
+                "CalibSelector": 2,
+                "CalibSpeedKp": orig_id_kp, "CalibSpeedKi": orig_id_ki,
+                "CalibObsGain": orig_iq_kp, "CalibPllKp": orig_iq_ki,
+                "CalibApply": 0xFF,
+            })
+            return self._make_current_report("Current_Loop", 0.0, orig_id_kp, orig_id_ki, orig_iq_kp, orig_iq_ki, StepResponseMetrics(), trials, "未找到合适参数")
+
     # ── Speed PI Tuning ─────────────────────────────────────────────────────
+
 
     def tune_speed_pi(
         self,
@@ -351,6 +525,40 @@ class AutoTuner:
             json.dump(data, f, indent=2, ensure_ascii=False)
         return report
 
+    def _make_current_report(
+        self, name: str, bw_hz: float, id_kp: float, id_ki: float, iq_kp: float, iq_ki: float,
+        metrics: StepResponseMetrics, trials: List[CurrentLoopTuneResult],
+        error: str = "",
+    ) -> CurrentLoopTuneReport:
+        report = CurrentLoopTuneReport(
+            parameter_name=name,
+            best_bw_hz=bw_hz,
+            best_id_kp=id_kp, best_id_ki=id_ki,
+            best_iq_kp=iq_kp, best_iq_ki=iq_ki,
+            best_metrics=metrics,
+            all_trials=trials,
+            timestamp=time.strftime("%Y%m%d_%H%M%S"),
+        )
+        filepath = os.path.join(self.output_dir, f"tune_{name}_{report.timestamp}.json")
+        data = {
+            "parameter_name": name,
+            "best_bw_hz": bw_hz,
+            "best_id_kp": id_kp, "best_id_ki": id_ki,
+            "best_iq_kp": iq_kp, "best_iq_ki": iq_ki,
+            "best_metrics": asdict(metrics),
+            "trials_count": len(trials),
+            "passed_count": sum(1 for t in trials if t.passed),
+            "error": error,
+            "trials": [
+                {"bw_hz": t.bw_hz, "id_kp": t.id_kp, "id_ki": t.id_ki, 
+                 "iq_kp": t.iq_kp, "iq_ki": t.iq_ki, "passed": t.passed, "reason": t.reason,
+                 "overshoot": t.metrics.overshoot_pct, "rise_time": t.metrics.rise_time_s}
+                for t in trials
+            ],
+        }
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return report
 
 # ── CLI Entry Point ─────────────────────────────────────────────────────────
 

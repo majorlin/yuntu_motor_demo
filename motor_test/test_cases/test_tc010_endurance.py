@@ -18,14 +18,18 @@ class TestEndurance:
 
     TEST_ID = "TC-010"
 
-    @pytest.mark.parametrize("duration_min", [30])
     def test_010_endurance(self, motor, can, waveform, analyzer, report,
-                            csv_logger, duration_min):
+                            csv_logger, test_logger, motor_profile):
         """耐久性测试: 连续运行并监控全量信号"""
-        t0 = time.time()
+        log = test_logger
+        wall_start_s = time.time()
+        monotonic_start_s = time.monotonic()
+        duration_min = float(
+            motor_profile.get("test", {}).get("endurance_duration_min", 30)
+        )
         duration_s = duration_min * 60
 
-        # Start motor
+        log.step(f"启动电机至 2000 RPM, 目标持续运行 {duration_min} 分钟")
         ok = motor.start_and_wait(target_rpm=2000.0, timeout=10.0)
         assert ok, "启动失败"
 
@@ -39,13 +43,17 @@ class TestEndurance:
         fault_events = []
         anomalies_detected = []
 
-        sample_interval = 0.1  # 100ms
-        check_interval = 1.0   # anomaly check every 1s
+        sample_interval = 0.1   # 100ms
+        check_interval = 1.0    # anomaly check every 1s
+        log_interval = 60.0     # progress log every 60s
         last_check = 0
+        last_log = 0
 
-        while (time.monotonic() - t0) < duration_s:
+        log.step("开始持续监控采样")
+
+        while (time.monotonic() - monotonic_start_s) < duration_s:
             now = time.monotonic()
-            elapsed = now - t0
+            elapsed = now - monotonic_start_s
 
             telem = motor.get_telemetry()
 
@@ -60,11 +68,12 @@ class TestEndurance:
             # Detect fault
             if telem.state == MotorState.FAULT:
                 fault_events.append(f"t={elapsed:.1f}s: {telem.fault.name}")
-                # Try to restart
+                log.error(f"故障! t={elapsed:.1f}s: {telem.fault.name}")
                 motor.stop()
                 time.sleep(2.0)
                 ok = motor.start_and_wait(target_rpm=2000.0, timeout=10.0)
                 if not ok:
+                    log.error("故障后无法重启, 终止测试")
                     break
 
             # Periodic anomaly check
@@ -74,10 +83,19 @@ class TestEndurance:
                 for a in new_anomalies:
                     anomalies_detected.append(f"t={elapsed:.1f}s: {a.description}")
 
+            # Periodic progress log
+            if (elapsed - last_log) >= log_interval:
+                last_log = elapsed
+                log.info(f"运行 {elapsed/60:.1f}min: RPM={telem.mechanical_rpm:.0f}, "
+                         f"Chip={telem.chip_temperature:.1f}°C, "
+                         f"Vbus={telem.bus_voltage_v:.1f}V")
+
             time.sleep(sample_interval)
 
-        duration = time.time() - t0
+        duration = time.time() - wall_start_s
         motor.stop_and_wait()
+
+        log.step("汇总统计结果")
 
         # Statistics
         rpm_arr = np.array(rpm_log)
@@ -87,16 +105,27 @@ class TestEndurance:
         chip_arr = np.array(chip_temp_log)
 
         rpm_stability = np.std(rpm_arr) / np.mean(rpm_arr) * 100 if np.mean(rpm_arr) > 0 else 0
+
+        log.data("运行时间(min)", f"{duration/60:.1f}")
+        log.data("故障次数", str(len(fault_events)))
+        log.data("RPM均值", f"{np.mean(rpm_arr):.1f}")
+        log.data("RPM波动(%)", f"{rpm_stability:.1f}")
+        log.data("芯片温度-起始(°C)", f"{chip_arr[0]:.1f}" if len(chip_arr) else "N/A")
+        log.data("芯片温度-结束(°C)", f"{chip_arr[-1]:.1f}" if len(chip_arr) else "N/A")
+
         passed = (
             len(fault_events) == 0
             and rpm_stability < 5.0
         )
 
+        verdict = TestVerdict.PASS if passed else TestVerdict.FAIL
+        log.print_summary(verdict.value)
+
         record = TestRecord(
             test_id=self.TEST_ID,
             test_name=f"耐久性测试 {duration_min}min",
             description=f"连续运行{duration_min}分钟，监控稳定性",
-            verdict=TestVerdict.PASS if passed else TestVerdict.FAIL,
+            verdict=verdict,
             duration_s=duration,
             preconditions="电机可正常闭环运行",
             test_method=f"以2000RPM连续运行{duration_min}分钟，每100ms采样关键信号",
@@ -120,6 +149,8 @@ class TestEndurance:
             },
             improvement_suggestions=[f"故障: {e}" for e in fault_events],
             waveform_files=[csv_logger],
+            test_steps=log.get_steps(),
+            test_logs=log.get_logs(),
         )
         report.add_record(record)
 

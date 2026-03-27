@@ -5,6 +5,7 @@ build
 # USER IGNORE BEGIN
 *.csv
 *.pyc
+.pytest_cache
 test_records
 
 # USER IGNORE END

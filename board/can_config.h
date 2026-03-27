@@ -143,6 +143,16 @@ typedef struct {
   float fw_voltage_threshold; /**< Field weakening voltage threshold. */
   float speed_ramp_rpm_per_s; /**< Speed ramp rate (rpm/s).           */
 
+  /* HFI / initial position detect */
+  bool hfi_enable;                  /**< Enable static HFI/IPD startup path. */
+  float hfi_inject_voltage_v;       /**< Bipolar HFI burst amplitude (V).    */
+  uint8_t hfi_pulse_pairs;          /**< +/- pulse pairs per candidate.      */
+  uint8_t hfi_candidate_count;      /**< Coarse candidate count over [0,pi). */
+  float hfi_confidence_threshold;   /**< Minimum scan confidence [0..1].     */
+  float hfi_polarity_voltage_v;     /**< Polarity pulse amplitude (V).       */
+  uint8_t hfi_polarity_pulse_count; /**< Positive polarity samples.          */
+  uint16_t hfi_align_hold_ms;       /**< Short align hold after HFI success. */
+
   bool pending;   /**< True when new values received.     */
   bool committed; /**< True after CalibApply = 0xFF.      */
 } can_calib_params_t;
@@ -176,6 +186,8 @@ typedef enum {
     CAN_WAVEFORM_CAPTURING = 1,  /**< Currently recording samples. */
     CAN_WAVEFORM_SENDING   = 2,  /**< Uploading via Status3 burst.  */
     CAN_WAVEFORM_DONE      = 3,  /**< Upload complete.              */
+    CAN_WAVEFORM_STEP_PRE  = 4,  /**< Pre-trigger ring buffer.      */
+    CAN_WAVEFORM_STEP_POST = 5,  /**< Post-trigger linear buffer.   */
 } can_waveform_state_t;
 
 /**
@@ -199,6 +211,11 @@ typedef struct {
     uint8_t                decimation;/**< Sample every N fast-loop ticks. */
     uint8_t                tick_count;/**< Internal tick counter.          */
     can_waveform_sample_t  samples[CAN_WAVEFORM_MAX_SAMPLES];
+    uint16_t               pre_samples;
+    uint16_t               post_samples;
+    uint16_t               ring_idx;
+    float                  inject_id_a;
+    bool                   step_applied;
 } can_waveform_capture_t;
 
 /**
@@ -286,5 +303,11 @@ void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
  * @return Current waveform state enum value.
  */
 can_waveform_state_t CanConfig_GetWaveformState(void);
+
+/**
+ * @brief Get the currently active step injection Id (A).
+ * @return D-axis current to inject (0 if not in STEP_POST state).
+ */
+float CanConfig_GetStepInjectId(void);
 
 #endif /* __CAN_CONFIG_H__ */

@@ -14,9 +14,6 @@
 
 #include "device_registers.h"
 
-#define MOTOR_HW_ADC_IRQ_DEBUG_GPIO (GPIOC)
-#define MOTOR_HW_ADC_IRQ_DEBUG_PIN (7U)
-#define MOTOR_HW_ADC_IRQ_DEBUG_PIN_MASK (1UL << MOTOR_HW_ADC_IRQ_DEBUG_PIN)
 
 #define MOTOR_HW_ADC_CURRENT_A_CH (ADC_INPUTCHAN_EXT2)
 #define MOTOR_HW_ADC_CURRENT_B_CH (ADC_INPUTCHAN_EXT3)
@@ -94,19 +91,7 @@ void MotorHwYtm32_SetOutputsMasked(bool masked);
  */
 void MotorHwYtm32_ApplyPhaseDuty(float dutyU, float dutyV, float dutyW);
 
-/**
- * @brief Assert the debug scope probe pin used to measure ADC IRQ duration.
- */
-static inline void MotorHwYtm32_SetAdcIrqDebugPinHigh(void) {
-  MOTOR_HW_ADC_IRQ_DEBUG_GPIO->PSOR = MOTOR_HW_ADC_IRQ_DEBUG_PIN_MASK;
-}
 
-/**
- * @brief De-assert the debug scope probe pin.
- */
-static inline void MotorHwYtm32_SetAdcIrqDebugPinLow(void) {
-  MOTOR_HW_ADC_IRQ_DEBUG_GPIO->PCOR = MOTOR_HW_ADC_IRQ_DEBUG_PIN_MASK;
-}
 
 /**
  * @brief Hardware-independent ADC raw reading frame.

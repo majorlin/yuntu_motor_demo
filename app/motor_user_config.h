@@ -19,11 +19,11 @@
 
 /* ======================== Motor Profile Selection =========================
  *
- * 切换电机只需修改下面一行：
- *   MOTOR_PROFILE_FAN  — 鼓风机电机
- *   MOTOR_PROFILE_SEAT — 座椅电机 (无负载)
+ * To switch motors, change only the following line:
+ *   MOTOR_PROFILE_FAN  — Fan / blower motor
+ *   MOTOR_PROFILE_SEAT — Seat motor (no load)
  *
- * 也可在编译命令行中指定：
+ * Can also be set on the compiler command line:
  *   -DMOTOR_PROFILE_SELECT=MOTOR_PROFILE_SEAT
  */
 #define MOTOR_PROFILE_FAN  1
@@ -44,7 +44,8 @@
 
 /* ------------------------------ App behavior ------------------------------ */
 
-/* 首次实机调试建议关闭自动起转，确认采样和PWM正常后再打开。 */
+/* Recommend disabling auto-start during initial board bring-up.
+ * Verify ADC sampling and PWM outputs are correct before enabling. */
 #define MOTOR_APP_AUTO_START (0U)
 
 /** @brief Default direction used at startup. Valid values are +1 or -1. */
@@ -85,24 +86,7 @@
 /* Requested deadtime between complementary switches, in nanoseconds. */
 #define MOTOR_CFG_DEADTIME_NS (500UL)
 
-/** @brief Enable CM33 DWT-based timing statistics for the fast loop. */
-#define MOTOR_CFG_ENABLE_DWT_PROFILE (0U)
 
-/** @brief Enable deadtime compensation in the FOC duty output path. */
-#ifndef MOTOR_CFG_ENABLE_DEADTIME_COMP
-#define MOTOR_CFG_ENABLE_DEADTIME_COMP (0U)
-#endif
-
-/** @brief Gain applied to the base deadtime duty compensation. */
-#ifndef MOTOR_CFG_DEADTIME_COMP_GAIN
-#define MOTOR_CFG_DEADTIME_COMP_GAIN (1.0f)
-#endif
-
-/** @brief Minimum phase current magnitude required to refresh the compensation
- * sign. */
-#ifndef MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A
-#define MOTOR_CFG_DEADTIME_COMP_MIN_CURRENT_A (0.4f)
-#endif
 
 /**
  * @brief Alpha/beta voltage modulation limit used by the SVM routine.
@@ -161,24 +145,8 @@
  */
 #define MOTOR_CFG_VBUS_OVERVOLTAGE_V (18.0f)
 
-/* ----------------------- Sensorless angle monitor ------------------------- */
 
-/**
- * @brief Minimum BEMF vector magnitude, in ADC counts, required to trust
- * manual-rotation angle monitoring.
- */
-#define MOTOR_CFG_ANGLE_MONITOR_MIN_BEMF_COUNTS (18.0f)
 
-/**
- * @brief Low-pass bandwidth for the hand-rotation speed estimate.
- */
-#define MOTOR_CFG_ANGLE_MONITOR_SPEED_FILTER_BW_HZ (25.0f)
-
-/**
- * @brief Minimum electrical speed magnitude required before the monitored
- * angle is marked valid.
- */
-#define MOTOR_CFG_ANGLE_MONITOR_VALID_SPEED_RAD_S (8.0f)
 
 /* ======================== Include Motor Profile ============================ */
 
@@ -208,9 +176,6 @@
                (uint64_t)MOTOR_CFG_DEADTIME_NS) /                              \
               1000000000ULL))
 
-#define MOTOR_CFG_DEADTIME_COMP_DUTY                                           \
-  (((float)MOTOR_CFG_DEADTIME_TICKS / (float)MOTOR_CFG_PWM_PERIOD_TICKS) *     \
-   MOTOR_CFG_DEADTIME_COMP_GAIN)
 
 #define MOTOR_CFG_CURRENT_SENSE_V_PER_A                                        \
   (MOTOR_CFG_PHASE_SHUNT_OHM * MOTOR_CFG_CURRENT_AMP_GAIN)

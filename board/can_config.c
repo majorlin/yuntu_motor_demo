@@ -19,13 +19,8 @@
 
 #include "motor_control.h"
 #include "motor_foc.h"
-#include "motor_param_ident.h"
 #include "motor_user_config.h"
 #include "sdk_project_config.h"
-
-/* Forward declaration for current gain API */
-extern void MotorFoc_SetCurrentGains(const motor_foc_current_gains_t *gains);
-extern void MotorFoc_GetCurrentGains(motor_foc_current_gains_t *gains);
 
 /* ═══════════════════════════════════════════════════════════════════════════════
  * Internal State
@@ -170,9 +165,6 @@ static void CanConfig_Callback(uint8_t instance, flexcan_event_type_t eventType,
  */
 static void CanConfig_SendStatus1(void) {
   const motor_status_t *st = MotorControl_GetStatus();
-  const volatile motor_fast_loop_profile_t *prof =
-      MotorControl_GetFastLoopProfile();
-  (void)prof; /* Reserved for future use */
 
   memset(s_txBuf, 0, CAN_MSG_DLC);
 
@@ -237,27 +229,7 @@ static void CanConfig_SendStatus1(void) {
 
   /* Bytes 35-38: Timestamp */
   pack_u32(s_txBuf, 35, MotorControl_GetTickMs());
-  /* Byte 39: AngleMonFlags
-   * Bit0=active, Bit1=valid, Bit2=direction positive */
-  {
-    uint8_t angleFlags = 0U;
-    if (st->angle_monitor_active) {
-      angleFlags |= 0x01U;
-    }
-    if (st->angle_monitor_valid) {
-      angleFlags |= 0x02U;
-    }
-    if (st->angle_monitor_speed_rad_s >= 0.0f) {
-      angleFlags |= 0x04U;
-    }
-    pack_u8(s_txBuf, 39, angleFlags);
-  }
-  /* Bytes 40-41: AngleMonAngle, scale=0.0001 */
-  pack_u16(s_txBuf, 40, (uint16_t)(st->angle_monitor_angle_rad / 0.0001f));
-  /* Bytes 42-43: AngleMonSpeedRadS, scale=0.1 */
-  pack_s16(s_txBuf, 42, (int16_t)(st->angle_monitor_speed_rad_s / 0.1f));
-  /* Bytes 44-45: AngleMonBemfMag, raw ADC counts */
-  pack_u16(s_txBuf, 44, st->angle_monitor_bemf_mag);
+  /* Bytes 39-45: Reserved (angle monitor removed) */
   /* Byte 46: HfiFlags
    * Bit0=active, Bit1=angle_valid, Bit2=used */
   {
@@ -355,21 +327,7 @@ static void CanConfig_SendStatus2(void) {
   /* Byte 48: BemfPhaseSeq, scale=1 (signed) */
   pack_s8(s_txBuf, 48, diag.bemf_phase_sequence);
 
-  /* ── Parameter identification telemetry (bytes 49-63) ── */
-  {
-    motor_ident_telemetry_t identTelem;
-    MotorParamIdent_GetTelemetry(&identTelem);
-    /* Byte 49: IdentPhase (enum 0-6, 5=DragFail) */
-    pack_u8(s_txBuf, 49, (uint8_t)identTelem.phase);
-    /* Byte 50: IdentProgress (0-100%) */
-    pack_u8(s_txBuf, 50, identTelem.progress);
-    /* Bytes 51-54: IdentRsOhm (float32) */
-    pack_f32(s_txBuf, 51, identTelem.rs_ohm);
-    /* Bytes 55-58: IdentLsH (float32) */
-    pack_f32(s_txBuf, 55, identTelem.ls_h);
-    /* Bytes 59-62: IdentLambdaVs (float32) */
-    pack_f32(s_txBuf, 59, identTelem.lambda_vs);
-  }
+  /* Bytes 49-63: Reserved (param ident telemetry removed) */
 
   static const flexcan_data_info_t txInfo = {
       .msg_id_type = FLEXCAN_MSG_ID_STD,
@@ -484,8 +442,7 @@ static void CanConfig_SendCalibReadback(void) {
   /* Byte 51: ActiveHfiPulsePairs */
   pack_u8(s_txBuf, 51, s_calibParams.hfi_pulse_pairs);
   /* Bytes 52-53: ActiveHfiInjectV, scale=0.01 */
-  pack_u16(s_txBuf, 52,
-           (uint16_t)(s_calibParams.hfi_inject_voltage_v / 0.01f));
+  pack_u16(s_txBuf, 52, (uint16_t)(s_calibParams.hfi_inject_voltage_v / 0.01f));
   /* Bytes 54-55: ActiveHfiConfidenceMin, scale=0.001 */
   pack_u16(s_txBuf, 54,
            (uint16_t)(s_calibParams.hfi_confidence_threshold / 0.001f));
@@ -570,20 +527,12 @@ static void CanConfig_ProcessCalibWrite(void) {
     s_calibParams.align_current_a = (float)unpack_u16(data, 25) * 0.01f;
     s_calibParams.fw_voltage_threshold = (float)unpack_u16(data, 27) * 0.0001f;
   } else if (selector == 2U) {
-    /* Group 2: Current loop PI gains */
+    /* Group 2: Current loop PI gains (store for readback only;
+     * runtime override removed — gains are compile-time constants) */
     s_calibParams.current_id_kp = unpack_f32(data, 1);
     s_calibParams.current_id_ki = unpack_f32(data, 5);
     s_calibParams.current_iq_kp = unpack_f32(data, 9);
     s_calibParams.current_iq_ki = unpack_f32(data, 13);
-
-    /* Apply current loop gains immediately to FOC engine */
-    motor_foc_current_gains_t gains = {
-        .id_kp = s_calibParams.current_id_kp,
-        .id_ki = s_calibParams.current_id_ki,
-        .iq_kp = s_calibParams.current_iq_kp,
-        .iq_ki = s_calibParams.current_iq_ki,
-    };
-    MotorFoc_SetCurrentGains(&gains);
   }
 
   uint8_t apply = unpack_u8(data, 29);
@@ -643,11 +592,11 @@ static void CanConfig_ProcessTestCommand(void) {
 
   case 0x04U: /* Step-triggered waveform capture */
   {
-    uint16_t preSamples  = unpack_u16(data, 26);
+    uint16_t preSamples = unpack_u16(data, 26);
     uint16_t postSamples = unpack_u16(data, 28);
-    float    injectIdA   = unpack_f32(data, 30);
-    uint8_t  decimation  = unpack_u8(data, 34);
-    
+    float injectIdA = unpack_f32(data, 30);
+    uint8_t decimation = unpack_u8(data, 34);
+
     if (preSamples + postSamples > CAN_WAVEFORM_MAX_SAMPLES) {
       float ratio = (float)preSamples / (float)(preSamples + postSamples);
       preSamples = (uint16_t)(CAN_WAVEFORM_MAX_SAMPLES * ratio);
@@ -672,12 +621,12 @@ static void CanConfig_ProcessTestCommand(void) {
     s_waveformCapture.decimation = decimation;
     s_waveformCapture.tick_count = 0U;
     s_waveformCapture.step_applied = false;
-    
+
     if (preSamples > 0U) {
-        s_waveformCapture.state = CAN_WAVEFORM_STEP_PRE;
+      s_waveformCapture.state = CAN_WAVEFORM_STEP_PRE;
     } else {
-        s_waveformCapture.step_applied = true;
-        s_waveformCapture.state = CAN_WAVEFORM_STEP_POST;
+      s_waveformCapture.step_applied = true;
+      s_waveformCapture.state = CAN_WAVEFORM_STEP_POST;
     }
     break;
   }
@@ -697,62 +646,11 @@ static void CanConfig_ProcessTestCommand(void) {
     }
     break;
 
-  case 0x10U: /* Reset current PI to compile-time defaults */
-  {
-    MotorFoc_SetCurrentGains(NULL);
-    motor_foc_current_gains_t defs;
-    MotorFoc_GetCurrentGains(&defs);
-    s_calibParams.current_id_kp = defs.id_kp;
-    s_calibParams.current_id_ki = defs.id_ki;
-    s_calibParams.current_iq_kp = defs.iq_kp;
-    s_calibParams.current_iq_ki = defs.iq_ki;
-    break;
-  }
-
-  case 0x20U: /* Start motor parameter identification */
-  {
-    motor_ident_config_t identCfg;
-    identCfg.pole_pairs = unpack_u8(data, 5);
-    identCfg.target_mech_rpm = unpack_f32(data, 6);
-    identCfg.test_current_a = unpack_f32(data, 10);
-    identCfg.lambda_iq_min_a = unpack_f32(data, 14);
-    identCfg.lambda_iq_max_a = unpack_f32(data, 18);
-    identCfg.lambda_iq_step_a = unpack_f32(data, 22);
-    /* Validate: use sensible defaults if GUI sends zeros */
-    if (identCfg.pole_pairs == 0U) {
-      identCfg.pole_pairs = MOTOR_CFG_POLE_PAIRS;
-    }
-    if (identCfg.target_mech_rpm < 10.0f) {
-      identCfg.target_mech_rpm = 300.0f;
-    }
-    if (identCfg.test_current_a < 0.05f) {
-      identCfg.test_current_a = 0.5f;
-    }
-    if (identCfg.lambda_iq_min_a < 0.05f) {
-      identCfg.lambda_iq_min_a = 0.3f;
-    }
-    if (identCfg.lambda_iq_max_a < identCfg.lambda_iq_min_a) {
-      identCfg.lambda_iq_max_a = identCfg.lambda_iq_min_a * 3.0f;
-    }
-    if (identCfg.lambda_iq_step_a < 0.01f) {
-      identCfg.lambda_iq_step_a = 0.2f;
-    }
-    MotorControl_StartParamIdentWithConfig(&identCfg);
-    break;
-  }
-
-  case 0x21U: /* Abort parameter identification */
-    MotorParamIdent_Abort();
-    MotorControl_Enable(false);
+  case 0x10U: /* Reset current PI — no-op in production (compile-time gains) */
     break;
 
-  case 0x30U: /* Start passive hand-rotation angle monitor */
-    MotorControl_EnableAngleMonitor(true);
-    break;
 
-  case 0x31U: /* Stop passive hand-rotation angle monitor */
-    MotorControl_EnableAngleMonitor(false);
-    break;
+    /* Angle monitor commands removed (feature deleted) */
 
   case 0x32U: /* Configure HFI/IPD runtime parameters */
   {
@@ -1026,8 +924,7 @@ void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
     sample->channels[6] = angle;
 
     s_waveformCapture.write_idx = idx + 1U;
-  }
-  else if (s_waveformCapture.state == CAN_WAVEFORM_STEP_PRE) {
+  } else if (s_waveformCapture.state == CAN_WAVEFORM_STEP_PRE) {
     uint16_t idx = s_waveformCapture.ring_idx;
     can_waveform_sample_t *sample = &s_waveformCapture.samples[idx];
     sample->channels[0] = ia;
@@ -1037,7 +934,7 @@ void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
     sample->channels[4] = id;
     sample->channels[5] = iq;
     sample->channels[6] = angle;
-    
+
     idx++;
     if (idx >= s_waveformCapture.pre_samples) {
       /* Pre-buffer full, switch to post and apply step */
@@ -1048,8 +945,7 @@ void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
     } else {
       s_waveformCapture.ring_idx = idx;
     }
-  }
-  else if (s_waveformCapture.state == CAN_WAVEFORM_STEP_POST) {
+  } else if (s_waveformCapture.state == CAN_WAVEFORM_STEP_POST) {
     uint16_t idx = s_waveformCapture.write_idx;
     if (idx >= s_waveformCapture.n_samples) {
       /* Post-buffer full, stop capturing and clear step */
@@ -1057,7 +953,7 @@ void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
       s_waveformCapture.state = CAN_WAVEFORM_IDLE;
       return;
     }
-    
+
     can_waveform_sample_t *sample = &s_waveformCapture.samples[idx];
     sample->channels[0] = ia;
     sample->channels[1] = ib;
@@ -1066,16 +962,16 @@ void CanConfig_WaveformSample(float ia, float ib, float ic, float vbus,
     sample->channels[4] = id;
     sample->channels[5] = iq;
     sample->channels[6] = angle;
-    
+
     s_waveformCapture.write_idx = idx + 1U;
   }
 }
 
 float CanConfig_GetStepInjectId(void) {
-    if (s_waveformCapture.step_applied) {
-        return s_waveformCapture.inject_id_a;
-    }
-    return 0.0f;
+  if (s_waveformCapture.step_applied) {
+    return s_waveformCapture.inject_id_a;
+  }
+  return 0.0f;
 }
 
 can_waveform_state_t CanConfig_GetWaveformState(void) {

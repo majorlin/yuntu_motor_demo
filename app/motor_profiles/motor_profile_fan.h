@@ -3,10 +3,10 @@
 
 /**
  * @file motor_profile_fan.h
- * @brief Motor profile: 鼓风机电机 (Fan/Blower)
+ * @brief Motor profile: Fan / Blower motor
  *
- * 特点：叶轮惯量大、低速负载力矩小。
- * 外拖反电势实测：AB 线电压峰峰值 1.96V，电频 17Hz。
+ * Characteristics: high impeller inertia, low starting torque.
+ * Measured back-EMF (externally driven): AB line-to-line Vpp = 1.96V, electrical freq = 17Hz.
  */
 
 /* ======================== Motor Electrical Model ========================== */
@@ -18,8 +18,8 @@
 #define MOTOR_CFG_LD_H (MOTOR_CFG_LS_H)
 #define MOTOR_CFG_LQ_H (MOTOR_CFG_LS_H)
 
-/* 由外拖反电势估算磁链：
- * AB 线电压峰峰值 1.96V、电频 17Hz。
+/* Flux linkage estimated from externally-driven back-EMF:
+ * AB line-to-line Vpp = 1.96V, electrical freq = 17Hz.
  * phase_peak = Vab_pp / (2 * sqrt(3))
  * lambda = phase_peak / omega_e
  */
@@ -45,8 +45,8 @@
 
 /* ======================== Speed Loop ======================================= */
 
-/* 叶轮惯量大、低速负载力矩小。降低 Ki 防止积分器饱和，
- * 降低 Kp 减小比例环节冲击。 */
+/* High impeller inertia, low starting torque.  Reduce Ki to prevent
+ * integrator saturation; reduce Kp to limit proportional step. */
 #define MOTOR_CFG_SPEED_KP (0.010250f)
 #define MOTOR_CFG_SPEED_KI (0.0010f)
 #define MOTOR_CFG_SPEED_RAMP_RPM_PER_S (600.0f)
@@ -58,7 +58,7 @@
 #define MOTOR_CFG_ALIGN_CURRENT_RAMP_TIME_MS (80U)
 #define MOTOR_CFG_ALIGN_TIME_MS (300U)
 
-/* 鼓风机负载力矩小，开环注入电流不宜过大 */
+/* Fan load torque is small; keep open-loop injection current moderate. */
 #define MOTOR_CFG_OPEN_LOOP_IQ_A (8.0f)
 #define MOTOR_CFG_IF_CURRENT_RAMP_TIME_MS (180U)
 #define MOTOR_CFG_IF_MIN_IQ_A (1.0f)
@@ -129,4 +129,6 @@
 #define MOTOR_CFG_FW_MAX_NEGATIVE_ID_A (-4.0f)
 #define MOTOR_CFG_FW_RECOVERY_RATE (20.0f)
 
+
 #endif /* MOTOR_PROFILE_FAN_H */
+

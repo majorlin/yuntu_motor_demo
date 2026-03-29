@@ -2,7 +2,10 @@
  * @file motor_control.h
  * @brief Top-level motor control state machine and public API.
  *
- * Manages the high-level states of the motor drive (Stop, Align, 
+ * @defgroup motor_control  Motor Control State Machine
+ * @{
+ *
+ * Manages the high-level states of the motor drive (Stop, Align,
  * Open-Loop Ramp, Closed-Loop, Fault), exposes the control interfaces
  * for speed and current, and handles profiling statistics.
  */
@@ -25,9 +28,7 @@ typedef enum
     MOTOR_STATE_ALIGN,           /**< Rotor alignment with DC current injected.   */
     MOTOR_STATE_OPEN_LOOP_RAMP,  /**< Ramping speed/current for startup tracking. */
     MOTOR_STATE_CLOSED_LOOP,     /**< Normal sensorless FOC closed-loop operation.*/
-    MOTOR_STATE_PARAM_IDENT,     /**< Offline motor parameter identification.     */
     MOTOR_STATE_FAULT,           /**< Drive faulted. Requires disable to reset.   */
-    MOTOR_STATE_ANGLE_MONITOR,   /**< Outputs off, monitor hand-rotated BEMF angle.*/
     MOTOR_STATE_HFI_IPD = 10     /**< Static high-frequency initial position detect. */
 } motor_control_state_t;
 
@@ -101,46 +102,8 @@ typedef struct
     float hfi_angle_rad;             /**< HFI estimated initial electrical angle.     */
     float hfi_confidence;            /**< HFI confidence / separation metric [0..1].  */
     float hfi_ripple_metric;         /**< Best synchronous current ripple metric (A). */
-    bool angle_monitor_active;       /**< True while passive BEMF angle monitor runs. */
-    bool angle_monitor_valid;        /**< True when manual-rotation angle is trusted. */
-    float angle_monitor_angle_rad;   /**< Monitored electrical angle from BEMF.       */
-    float angle_monitor_speed_rad_s; /**< Monitored electrical speed from BEMF.       */
-    uint16_t angle_monitor_bemf_mag; /**< BEMF vector magnitude in raw ADC counts.    */
 } motor_status_t;
 
-/**
- * @brief Accumulator structure for timing statistics.
- */
-typedef struct
-{
-    uint32_t last_cycles;            /**< CPU tick count for the last iteration.      */
-    uint32_t min_cycles;             /**< Minimum recorded CPU tick count.            */
-    uint32_t max_cycles;             /**< Maximum recorded CPU tick count.            */
-    uint32_t avg_cycles;             /**< Exponentially smoothed average tick count.  */
-    uint64_t total_cycles;           /**< Cumulative total block time across samples. */
-    uint32_t sample_count;           /**< Measurement count since last reset.         */
-} motor_cycle_stat_t;
-
-/**
- * @brief Root structure for high-resolution CPU timing breakdowns.
- */
-typedef struct
-{
-    bool dwt_enabled;                    /**< Flag if the DWT hardware is enabled.   */
-    uint32_t core_clock_hz;              /**< Core clock speed reference.            */
-    uint32_t fast_loop_hz;               /**< Expected fast loop trigger frequency.  */
-    motor_cycle_stat_t adc_irq_total;    /**< Total duration of the ADC interrupt.   */
-    motor_cycle_stat_t foc_total;        /**< Entire FOC math pipeline duration.     */
-    motor_cycle_stat_t foc_observer_pll; /**< Observer and PLL section execution.    */
-    motor_cycle_stat_t foc_current_loop; /**< Park to SVM Current-Loop execution.    */
-    motor_cycle_stat_t foc_svm;          /**< Space-Vector modulation calculation.   */
-    motor_cycle_stat_t pwm_update;       /**< Hardware PWM register update transfer. */
-} motor_fast_loop_profile_t;
-
-/**
- * @brief Global pointer for debugging / profiling statistics.
- */
-extern volatile motor_fast_loop_profile_t g_motorFastLoopProfile;
 
 /**
  * @brief Initialize motor control structures and hardware logic.
@@ -161,16 +124,7 @@ void MotorControl_Init(void);
  */
 void MotorControl_Enable(bool enable);
 
-/**
- * @brief Enable or disable passive BEMF angle monitoring.
- *
- * When enabled, the MCU keeps all inverter outputs masked, samples the BEMF
- * network, and continuously estimates electrical angle/speed while the user
- * manually rotates the rotor.
- *
- * @param enable True to enter monitor mode, False to return to STOP.
- */
-void MotorControl_EnableAngleMonitor(bool enable);
+
 
 /**
  * @brief Change motor control tracking reference mode.
@@ -215,17 +169,6 @@ bool MotorControl_SetDirection(int8_t direction);
  */
 const motor_status_t *MotorControl_GetStatus(void);
 
-/**
- * @brief Read FOC fast-loop CPU profiling statistics.
- *
- * @return Pointer to read-only cycle stat tracing data.
- */
-const volatile motor_fast_loop_profile_t *MotorControl_GetFastLoopProfile(void);
-
-/**
- * @brief Clear accumulated statistical cycles trace structures.
- */
-void MotorControl_ResetFastLoopProfile(void);
 
 /**
  * @brief Get the millisecond system tick count since initialization.
@@ -239,30 +182,6 @@ uint32_t MotorControl_GetTickMs(void);
  */
 float MotorControl_GetWindDetectSpeedRpm(void);
 
-/**
- * @brief Start offline motor parameter identification.
- *
- * Can only be called while the motor is stopped (MOTOR_STATE_STOP).
- * The drive performs offset calibration, then runs the Rs/Ls/λ
- * identification sequence.  On completion the drive returns to STOP
- * with the measured parameters available via the ident module API.
- *
- * @return true if accepted, false if the motor is not stopped.
- */
-bool MotorControl_StartParamIdent(void);
-
-/**
- * @brief Start motor parameter identification with user-provided config.
- *
- * Same as MotorControl_StartParamIdent() but uses the caller's
- * configuration (pole pairs, target RPM, current limits) instead
- * of compile-time defaults.
- *
- * @param cfg  Partial ident config; system fills in timing fields.
- * @return true if accepted, false if the motor is not stopped.
- */
-#include "motor_param_ident.h"
-bool MotorControl_StartParamIdentWithConfig(const motor_ident_config_t *cfg);
 
 /**
  * @brief Snapshot of FOC internal diagnostics for CAN telemetry.
@@ -309,4 +228,5 @@ typedef struct {
  */
 void MotorControl_GetFocDiagnostics(motor_foc_diagnostics_t *diag);
 
+/** @} */
 #endif /* MOTOR_CONTROL_H */

@@ -3,12 +3,12 @@
 
 /**
  * @file motor_profile_seat.h
- * @brief Motor profile: 座椅电机 (Seat motor, no load)
+ * @brief Motor profile: Seat motor (no load)
  *
- * 特点：无负载、转动惯量极小、响应快。
- * 外拖反电势实测：AB 线电压峰峰值 28.6V，电频 385Hz。
+ * Characteristics: no mechanical load, very low inertia, fast response.
+ * Measured back-EMF (externally driven): AB line-to-line Vpp = 28.6V, electrical freq = 385Hz.
  *
- * 参数推导：
+ * Parameter derivation:
  *   phase_peak = 28.6 / (2 * sqrt(3)) = 8.256 V
  *   omega_e    = 2 * pi * 385        = 2419.0 rad/s
  *   lambda     = 8.256 / 2419.0      = 0.003413 Vs
@@ -24,8 +24,8 @@
 #define MOTOR_CFG_LD_H (MOTOR_CFG_LS_H)
 #define MOTOR_CFG_LQ_H (MOTOR_CFG_LS_H)
 
-/* 由外拖反电势估算磁链：
- * AB 线电压峰峰值 28.6V、电频 385Hz。
+/* Flux linkage estimated from externally-driven back-EMF:
+ * AB line-to-line Vpp = 28.6V, electrical freq = 385Hz.
  * phase_peak = Vab_pp / (2 * sqrt(3))
  * lambda = phase_peak / omega_e
  */
@@ -37,28 +37,28 @@
   (MOTOR_CFG_BEMF_PHASE_PEAK_V /                                               \
    (MOTOR_CFG_TWO_PI_F * MOTOR_CFG_BEMF_ELEC_FREQ_HZ))
 
-/* 无负载座椅电机，额定电流较小 */
+/* Seat motor (no load), rated current is small. */
 #define MOTOR_CFG_MAX_IQ_A (10.0f)
 #define MOTOR_CFG_DEFAULT_TARGET_IQ_A (0.5f)
 
 /* ======================== Speed / Target Range ============================ */
 
-/* 外拖空载 5775RPM，留裕量上限 5500RPM */
+/* No-load rated speed ~5775 RPM; set upper limit to 5500 RPM with margin. */
 #define MOTOR_CFG_DEFAULT_TARGET_RPM (2000.0f)
 #define MOTOR_CFG_MAX_TARGET_RPM (5500.0f)
 
 /* ======================== Current Loop =====================================
  */
 
-/* Ls/Rs 时间常数 = 0.00045158/0.05 = 9.03ms，电流环带宽可取 2000Hz。
- * 无负载电机电流响应需要更快。 */
+/* Ls/Rs time constant = 0.00045158/0.05 = 9.03ms; current loop BW can be set to 2000Hz.
+ * No-load motor needs faster current response. */
 #define MOTOR_CFG_CURRENT_LOOP_BW_HZ (2000.0f)
 
 /* ======================== Speed Loop =======================================
  */
 
-/* 无负载惯量极小，Kp/Ki 需要更小防止超调振荡。
- * 速度命令斜坡可以设得更陡，因为无负载加速很快。 */
+/* Near-zero inertia; Kp/Ki must be small to prevent overshoot oscillation.
+ * Speed ramp can be steeper since no-load acceleration is very fast. */
 #define MOTOR_CFG_SPEED_KP (0.005375)
 #define MOTOR_CFG_SPEED_KI (0.05f)
 #define MOTOR_CFG_SPEED_RAMP_RPM_PER_S (2000.0f)
@@ -68,7 +68,7 @@
 
 #define MOTOR_CFG_ALIGN_ANGLE_RAD (0.0f)
 
-/* 无负载不需要大电流对齐和开环拖动 */
+/* No load: small alignment and open-loop injection currents suffice. */
 #define MOTOR_CFG_ALIGN_CURRENT_A (0.5f)
 #define MOTOR_CFG_ALIGN_CURRENT_RAMP_TIME_MS (30U)
 #define MOTOR_CFG_ALIGN_TIME_MS (100U)
@@ -97,7 +97,7 @@
 /* ======================== Startup Retry / Stall ============================
  */
 
-/* 无负载启动非常容易，缩短超时 */
+/* No-load startup is very easy; shorten timeout accordingly. */
 #define MOTOR_CFG_STARTUP_TIMEOUT_MS (1000U)
 #define MOTOR_CFG_STARTUP_MAX_RETRIES (0U)
 #define MOTOR_CFG_STARTUP_IQ_BOOST_STEP_A (0.5f)
@@ -108,20 +108,20 @@
 /* ======================== Observer / PLL ===================================
  */
 
-/* Rs 低 + Ls 较大 → 降低观测器增益避免噪声放大 */
+/* Low Rs + moderate Ls: reduce observer gains to avoid noise amplification. */
 #define MOTOR_CFG_OBSERVER_GAIN (0.8e6f)
 #define MOTOR_CFG_LAMBDA_COMP_BW_RAD_S (100.0f)
 
-/* 磁链范围基于推导值 0.003413 Vs，±50% */
+/* Flux range based on derived value 0.003413 Vs, +/-50% */
 #define MOTOR_CFG_LAMBDA_MIN_VS (0.0017f)
 #define MOTOR_CFG_LAMBDA_MAX_VS (0.0052f)
 
-/* 速度快 → PLL 带宽适当提高 */
+/* High speed operation: increase PLL bandwidth accordingly. */
 #define MOTOR_CFG_PLL_KP (200.0f)
 #define MOTOR_CFG_PLL_KI (10000.0f)
 #define MOTOR_CFG_OBSERVER_PHASE_TRACK_BW_RAD_S (30.0f)
 
-/* 无负载锁定更快，可以降低锁定样本计数 */
+/* No-load locks faster; reduce lock sample count. */
 #define MOTOR_CFG_OBSERVER_LOCK_PHASE_ERR_RAD (1.00f)
 #define MOTOR_CFG_OBSERVER_LOSS_PHASE_ERR_RAD (1.20f)
 #define MOTOR_CFG_OBSERVER_LOCK_COUNT (10U)
@@ -148,11 +148,12 @@
 /* ======================== Field Weakening ==================================
  */
 
-/* 座椅电机低磁链高速，弱磁更重要 */
+/* Seat motor: low flux + high speed, field weakening is important. */
 #define MOTOR_CFG_ENABLE_FIELD_WEAKENING (0U)
 #define MOTOR_CFG_FW_VOLTAGE_THRESHOLD (0.48f)
 #define MOTOR_CFG_FW_KI (80.0f)
 #define MOTOR_CFG_FW_MAX_NEGATIVE_ID_A (-3.0f)
 #define MOTOR_CFG_FW_RECOVERY_RATE (30.0f)
+
 
 #endif /* MOTOR_PROFILE_SEAT_H */

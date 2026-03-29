@@ -54,18 +54,6 @@ static bool s_adcConfiguredForHardwareTrigger = true;
 static uint8_t s_adcSequenceLength = MOTOR_HW_ADC_CURRENT_SEQ_LEN;
 static ADC_Type *const s_motorHwAdcBase = ADC0;
 
-/**
- * @brief Initializes the debug scope probe pin for ADC IRQ duration tracing.
- */
-static void MotorHwYtm32_InitAdcIrqDebugPin(void) {
-  /* Repurpose PTC7 as a scope probe for ADC IRQ execution time. */
-  PINS_DRV_SetPullSel(PCTRLC, MOTOR_HW_ADC_IRQ_DEBUG_PIN,
-                      PCTRL_INTERNAL_PULL_NOT_ENABLED);
-  PINS_DRV_SetMuxModeSel(PCTRLC, MOTOR_HW_ADC_IRQ_DEBUG_PIN, PCTRL_MUX_AS_GPIO);
-  PINS_DRV_SetPinDirection(MOTOR_HW_ADC_IRQ_DEBUG_GPIO,
-                           MOTOR_HW_ADC_IRQ_DEBUG_PIN, GPIO_OUTPUT_DIRECTION);
-  MotorHwYtm32_SetAdcIrqDebugPinLow();
-}
 
 /**
  * @brief Select TMU trigger path for the ADC peripheral.
@@ -327,7 +315,6 @@ static bool MotorHwYtm32_TryReadAdcFrame(motor_adc_raw_frame_t *frame) {
 
 void MotorHwYtm32_Init(void) {
   MotorHwYtm32_ConfigClocks();
-  MotorHwYtm32_InitAdcIrqDebugPin();
   MotorHwYtm32_SelectAdc0ExternalTriggerFromTmu();
   INT_SYS_DisableIRQ(ADC0_IRQn);
   MotorHwYtm32_ConfigAdc(true, true, true);
